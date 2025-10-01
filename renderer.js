@@ -24,7 +24,7 @@ class ChordDetector {
         // Audio output with delay and announcements
         this.audioOutputEnabled = false;
         this.delayBuffer = null;
-        this.delayTime = 1.0; // 1 second delay
+        this.delayTime = 2.0; // 2 second delay
         this.lastAnnouncedChord = null;
         this.announcementOscillator = null;
         this.announcementGain = null;
@@ -438,7 +438,7 @@ class ChordDetector {
             if (item.chord) {
                 // Check if chord has been playing for more than 1 second
                 const timeSinceDetection = currentTime - item.detectionTime;
-                const hasPlayed = timeSinceDetection > 1000; // 1 second delay
+                const hasPlayed = timeSinceDetection > 2000; // 2 second delay
                 
                 const className = hasPlayed ? 'ticker-item played' : 'ticker-item upcoming';
                 return `<span class="${className}">${item.chord}</span>`;
@@ -797,7 +797,7 @@ class ChordDetector {
             this.disableAudioOutputBtn.classList.add('hidden');
             
             console.log('enableAudioOutput: Successfully enabled');
-            this.status.textContent = 'Audio con retraso de 1 segundo activado. Los acordes se muestran antes de reproducirse.';
+            this.status.textContent = 'Audio con retraso de 2 segundos activado. Los acordes se muestran antes de reproducirse.';
             this.status.className = 'status info';
             
             // Test tone to verify audio is working
@@ -911,7 +911,7 @@ class ChordDetector {
         // Calculate remaining delay time (1 second minus time already passed since detection)
         const currentTime = performance.now();
         const timeSinceDetection = currentTime - detectionTime;
-        const remainingDelay = Math.max(0, 1000 - timeSinceDetection); // Ensure at least 0ms delay
+        const remainingDelay = Math.max(0, 2000 - timeSinceDetection); // Ensure at least 0ms delay
         
         console.log(`playChordAnnouncement: Chord ${chordName}, scheduling announcement in ${remainingDelay}ms`);
 
