@@ -18,6 +18,8 @@ class ChordDetector {
         this.lastChord = null;
         this.tickerItems = [];
         this.maxTickerItems = 15;
+        this.chordTimestamps = new Map(); // Track when chords were detected
+        this.lastDetectionTime = 0; // Track when chord was detected
         
         // Audio output with delay and announcements
         this.audioOutputEnabled = false;
@@ -26,6 +28,8 @@ class ChordDetector {
         this.lastAnnouncedChord = null;
         this.announcementOscillator = null;
         this.announcementGain = null;
+        this.delayNode = null;
+        this.delayGain = null;
         
         this.initializeElements();
         this.loadAudioDevices();
@@ -290,6 +294,13 @@ class ChordDetector {
             this.status.textContent = 'Detección activa. Tocando música...';
             this.status.className = 'status info';
             
+            // If audio output was previously enabled, re-enable it
+            if (this.audioOutputEnabled) {
+                setTimeout(() => {
+                    this.enableAudioOutput();
+                }, 500);
+            }
+            
             this.processAudio();
             
         } catch (error) {
@@ -372,10 +383,11 @@ class ChordDetector {
                 if (this.lastChord !== chord.name) {
                     this.addToTicker(chord.name);
                     this.lastChord = chord.name;
+                    this.lastDetectionTime = currentTime;
                     
                     // Play chord announcement if audio output is enabled
                     if (this.audioOutputEnabled) {
-                        this.playChordAnnouncement(chord.name);
+                        this.playChordAnnouncement(chord.name, currentTime);
                     }
                 } else {
                     // Add empty space when chord doesn't change
@@ -390,15 +402,26 @@ class ChordDetector {
             }
         }
 
+        // Update ticker colors based on timing
+        this.updateTicker();
+        
         this.animationId = requestAnimationFrame(() => this.processAudio());
     }
 
     addToTicker(chordName) {
+        const currentTime = Date.now();
+        
         // Add new item to ticker (note or empty space)
         this.tickerItems.push({
             chord: chordName,
-            timestamp: new Date().toLocaleTimeString()
+            timestamp: new Date().toLocaleTimeString(),
+            detectionTime: currentTime
         });
+        
+        // Store detection time for chord timing
+        if (chordName) {
+            this.chordTimestamps.set(chordName, currentTime);
+        }
         
         // Limit the number of items (keep the most recent ones)
         if (this.tickerItems.length > this.maxTickerItems) {
@@ -410,9 +433,15 @@ class ChordDetector {
     }
 
     updateTicker() {
+        const currentTime = Date.now();
         const tickerHTML = this.tickerItems.map(item => {
             if (item.chord) {
-                return `<span class="ticker-item">${item.chord}</span>`;
+                // Check if chord has been playing for more than 1 second
+                const timeSinceDetection = currentTime - item.detectionTime;
+                const hasPlayed = timeSinceDetection > 1000; // 1 second delay
+                
+                const className = hasPlayed ? 'ticker-item played' : 'ticker-item upcoming';
+                return `<span class="${className}">${item.chord}</span>`;
             } else {
                 return `<span class="ticker-empty">•</span>`;
             }
@@ -712,6 +741,29 @@ class ChordDetector {
                 return;
             }
             
+            // Set output device using setSinkId
+            try {
+                await this.audioContext.setSinkId(outputDeviceId);
+                console.log('enableAudioOutput: Output device set to:', outputDeviceId);
+            } catch (error) {
+                console.warn('enableAudioOutput: setSinkId not supported, using default device:', error);
+            }
+            
+            // Create delay node for audio output with 1 second delay
+            this.delayNode = this.audioContext.createDelay();
+            this.delayNode.delayTime.setValueAtTime(this.delayTime, this.audioContext.currentTime);
+            
+            // Create gain node for delayed audio
+            this.delayGain = this.audioContext.createGain();
+            this.delayGain.gain.setValueAtTime(1.0, this.audioContext.currentTime);
+            
+            // Connect source -> delay -> gain -> destination
+            this.source.connect(this.delayNode);
+            this.delayNode.connect(this.delayGain);
+            this.delayGain.connect(this.audioContext.destination);
+            
+            console.log('enableAudioOutput: Audio delay chain created with 1 second delay');
+            
             // Only create new oscillator if one doesn't exist
             if (!this.announcementOscillator) {
                 console.log('enableAudioOutput: Creating new oscillator');
@@ -729,16 +781,6 @@ class ChordDetector {
                 
                 // Connect nodes
                 this.announcementOscillator.connect(this.announcementGain);
-                
-                // Set output device using setSinkId
-                try {
-                    await this.audioContext.setSinkId(outputDeviceId);
-                    console.log('enableAudioOutput: Output device set to:', outputDeviceId);
-                } catch (error) {
-                    console.warn('enableAudioOutput: setSinkId not supported, using default device:', error);
-                }
-                
-                // Connect to audio context destination (now with correct sink)
                 this.announcementGain.connect(this.audioContext.destination);
                 
                 // Start oscillator (it will be silent until we adjust gain)
@@ -746,14 +788,6 @@ class ChordDetector {
                 console.log('enableAudioOutput: Oscillator started');
             } else {
                 console.log('enableAudioOutput: Using existing oscillator');
-                
-                // Update output device for existing oscillator
-                try {
-                    await this.audioContext.setSinkId(outputDeviceId);
-                    console.log('enableAudioOutput: Updated output device to:', outputDeviceId);
-                } catch (error) {
-                    console.warn('enableAudioOutput: setSinkId not supported:', error);
-                }
             }
             
             this.audioOutputEnabled = true;
@@ -763,7 +797,7 @@ class ChordDetector {
             this.disableAudioOutputBtn.classList.add('hidden');
             
             console.log('enableAudioOutput: Successfully enabled');
-            this.status.textContent = 'Anuncios de acordes activados automáticamente';
+            this.status.textContent = 'Audio con retraso de 1 segundo activado. Los acordes se muestran antes de reproducirse.';
             this.status.className = 'status info';
             
             // Test tone to verify audio is working
@@ -776,7 +810,7 @@ class ChordDetector {
             
         } catch (error) {
             console.error('Error enabling audio output:', error);
-            this.status.textContent = 'Error al activar anuncios de audio: ' + error.message;
+            this.status.textContent = 'Error al activar audio con retraso: ' + error.message;
             this.status.className = 'status error';
         }
     }
@@ -826,6 +860,22 @@ class ChordDetector {
         if (this.audioOutputEnabled) {
             console.log('disableAudioOutput: Disabling audio output');
             
+            // Disconnect delay chain
+            if (this.delayNode) {
+                this.delayNode.disconnect();
+                this.delayNode = null;
+            }
+            if (this.delayGain) {
+                this.delayGain.disconnect();
+                this.delayGain = null;
+            }
+            
+            // Reconnect source directly to analyser (no delay)
+            if (this.source && this.analyser) {
+                this.source.disconnect();
+                this.source.connect(this.analyser);
+            }
+            
             // Silencia el oscilador en lugar de detenerlo
             if (this.announcementGain) {
                 this.announcementGain.gain.cancelScheduledValues(this.audioContext.currentTime);
@@ -839,12 +889,12 @@ class ChordDetector {
             this.enableAudioOutputBtn.classList.add('hidden');
             this.disableAudioOutputBtn.classList.add('hidden');
             
-            this.status.textContent = 'Anuncios de acordes desactivados';
+            this.status.textContent = 'Audio con retraso desactivado';
             this.status.className = 'status';
         }
     }
 
-    playChordAnnouncement(chordName) {
+    playChordAnnouncement(chordName, detectionTime) {
         if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
             console.log(`playChordAnnouncement: Not ready - enabled: ${this.audioOutputEnabled}, osc: ${!!this.announcementOscillator}, gain: ${!!this.announcementGain}`);
             return;
@@ -858,30 +908,44 @@ class ChordDetector {
 
         this.lastAnnouncedChord = chordName;
 
-        // Map chord to frequency for announcement tone
-        const noteFrequencies = {
-            'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13,
-            'E': 329.63, 'F': 349.23, 'F#': 369.99, 'G': 392.00,
-            'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88,
-            'Cm': 261.63, 'C#m': 277.18, 'Dm': 293.66, 'D#m': 311.13,
-            'Em': 329.63, 'Fm': 349.23, 'F#m': 369.99, 'Gm': 392.00,
-            'G#m': 415.30, 'Am': 440.00, 'A#m': 466.16, 'Bm': 493.88
-        };
+        // Calculate remaining delay time (1 second minus time already passed since detection)
+        const currentTime = performance.now();
+        const timeSinceDetection = currentTime - detectionTime;
+        const remainingDelay = Math.max(0, 1000 - timeSinceDetection); // Ensure at least 0ms delay
+        
+        console.log(`playChordAnnouncement: Chord ${chordName}, scheduling announcement in ${remainingDelay}ms`);
 
-        const frequency = noteFrequencies[chordName] || 440;
-        
-        console.log(`playChordAnnouncement: Playing chord ${chordName} at frequency ${frequency}Hz`);
-        
-        // Set oscillator type and frequency
-        this.announcementOscillator.type = 'sine';
-        this.announcementOscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
-        
-        // Create a short beep sound (0.3 seconds) with clean fade-out
-        const now = this.audioContext.currentTime;
-        this.announcementGain.gain.cancelScheduledValues(now); // Cancel any previous schedules
-        this.announcementGain.gain.setValueAtTime(0.5, now); // Start at 50% volume
-        this.announcementGain.gain.exponentialRampToValueAtTime(0.001, now + 0.25); // Fade out over 0.25 seconds
-        this.announcementGain.gain.linearRampToValueAtTime(0, now + 0.3); // Ensure complete silence at 0.3 seconds
+        // Schedule the announcement using setTimeout for precise timing
+        setTimeout(() => {
+            if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
+                return;
+            }
+
+            // Map chord to frequency for announcement tone
+            const noteFrequencies = {
+                'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13,
+                'E': 329.63, 'F': 349.23, 'F#': 369.99, 'G': 392.00,
+                'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88,
+                'Cm': 261.63, 'C#m': 277.18, 'Dm': 293.66, 'D#m': 311.13,
+                'Em': 329.63, 'Fm': 349.23, 'F#m': 369.99, 'Gm': 392.00,
+                'G#m': 415.30, 'Am': 440.00, 'A#m': 466.16, 'Bm': 493.88
+            };
+
+            const frequency = noteFrequencies[chordName] || 440;
+            
+            // Set oscillator type and frequency
+            this.announcementOscillator.type = 'sine';
+            this.announcementOscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+            
+            // Create a short beep sound (0.3 seconds) with clean fade-out
+            const now = this.audioContext.currentTime;
+            this.announcementGain.gain.cancelScheduledValues(now); // Cancel any previous schedules
+            this.announcementGain.gain.setValueAtTime(0.5, now); // Start at 50% volume
+            this.announcementGain.gain.exponentialRampToValueAtTime(0.001, now + 0.25); // Fade out over 0.25 seconds
+            this.announcementGain.gain.linearRampToValueAtTime(0, now + 0.3); // Ensure complete silence at 0.3 seconds
+            
+            console.log(`playChordAnnouncement: Playing chord ${chordName} at frequency ${frequency}Hz`);
+        }, remainingDelay);
     }
 }
 
