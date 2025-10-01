@@ -20,6 +20,7 @@ class ChordDetector {
         this.maxTickerItems = 15;
         this.chordTimestamps = new Map(); // Track when chords were detected
         this.lastDetectionTime = 0; // Track when chord was detected
+        this.playingChords = new Map(); // Track chords currently playing (red highlight)
         
         // Audio output with delay and announcements
         this.audioOutputEnabled = false;
@@ -30,6 +31,16 @@ class ChordDetector {
         this.announcementGain = null;
         this.delayNode = null;
         this.delayGain = null;
+        
+        // Improved detection variables
+        this.previousSpectrum = null;
+        this.onsetThreshold = 0.1;
+        this.noiseFloor = 0.01;
+        this.frameHistory = [];
+        this.maxFrameHistory = 8;
+        this.adaptiveThreshold = 0.02;
+        this.spectralFluxHistory = [];
+        this.lastOnsetTime = 0;
         
         this.initializeElements();
         this.loadAudioDevices();
@@ -440,7 +451,19 @@ class ChordDetector {
                 const timeSinceDetection = currentTime - item.detectionTime;
                 const hasPlayed = timeSinceDetection > 2000; // 2 second delay
                 
-                const className = hasPlayed ? 'ticker-item played' : 'ticker-item upcoming';
+                // Check if chord is currently playing (red highlight for 0.5 seconds)
+                const isPlaying = this.playingChords.has(item.chord) &&
+                                 currentTime - this.playingChords.get(item.chord) < 500;
+                
+                let className;
+                if (isPlaying) {
+                    className = 'ticker-item playing';
+                } else if (hasPlayed) {
+                    className = 'ticker-item played';
+                } else {
+                    className = 'ticker-item upcoming';
+                }
+                
                 return `<span class="${className}">${item.chord}</span>`;
             } else {
                 return `<span class="ticker-empty">•</span>`;
@@ -458,18 +481,18 @@ class ChordDetector {
         }
         const rms = Math.sqrt(sumSquares / audioData.length);
 
-        // Adaptive threshold - start with very low threshold and adjust dynamically
-        let threshold = 0.02; // Very low threshold for maximum sensitivity
+        // Very low threshold for studio audio - maximum sensitivity
+        let threshold = 0.005; // Much lower threshold for studio recordings
         
         // Beat detection with improved logic
-        if (rms > threshold && currentTime - this.lastBeatTime > 100) {
+        if (rms > threshold && currentTime - this.lastBeatTime > 80) { // Shorter cooldown
             // Detected a beat
             this.lastBeatTime = currentTime;
             this.beatHistory.push(currentTime);
             
-            // Keep only recent beats (last 6 seconds for faster adaptation)
-            const sixSecondsAgo = currentTime - 6000;
-            this.beatHistory = this.beatHistory.filter(time => time > sixSecondsAgo);
+            // Keep only recent beats (last 4 seconds for faster adaptation)
+            const fourSecondsAgo = currentTime - 4000;
+            this.beatHistory = this.beatHistory.filter(time => time > fourSecondsAgo);
             
             // Calculate BPM from beat intervals with improved accuracy
             if (this.beatHistory.length >= 2) {
@@ -497,7 +520,7 @@ class ChordDetector {
         }
         
         // If no beats detected for a while, reset to default
-        if (currentTime - this.lastBeatTime > 3000 && this.beatHistory.length > 0) {
+        if (currentTime - this.lastBeatTime > 2000 && this.beatHistory.length > 0) { // Shorter timeout
             this.beatHistory = [];
             this.bpm = 120;
             this.sampleInterval = 0;
@@ -576,14 +599,29 @@ class ChordDetector {
         const frequencyData = new Uint8Array(bufferLength);
         this.analyser.getByteFrequencyData(frequencyData);
         
-        // Find fundamental frequencies using harmonic analysis
+        // Improved onset detection for studio-quality audio
+        const hasOnset = this.detectOnset(frequencyData);
+        
+        // For studio recordings, use fixed high sensitivity threshold
+        // No adaptive threshold needed for clean audio
+        this.adaptiveThreshold = 0.01; // Very sensitive for studio audio
+        
+        // Always analyze when onset is detected, otherwise sample based on BPM
+        const currentTime = performance.now();
+        const shouldAnalyze = hasOnset || this.shouldSample(currentTime);
+        
+        if (!shouldAnalyze) {
+            return null;
+        }
+        
+        // Find fundamental frequencies using improved harmonic analysis
         const fundamentals = this.findFundamentalFrequencies(frequencyData);
         
         // Convert frequencies to notes with octave information
         const notesWithOctaves = fundamentals.map(freq => this.frequencyToNoteWithOctave(freq));
         
-        // Enhanced chord detection with harmonic analysis
-        return this.identifyChordWithHarmonics(notesWithOctaves, fundamentals);
+        // Enhanced chord detection with temporal analysis
+        return this.identifyChordWithTemporalAnalysis(notesWithOctaves, fundamentals);
     }
 
     findFundamentalFrequencies(frequencyData) {
@@ -591,7 +629,10 @@ class ChordDetector {
         const sampleRate = this.audioContext.sampleRate;
         const bufferLength = frequencyData.length;
         
-        // Find all local maxima
+        // Fixed high sensitivity threshold for studio audio (much lower)
+        const amplitudeThreshold = 16; // Very low threshold for maximum sensitivity
+        
+        // Find all local maxima with improved peak detection
         for (let i = 2; i < bufferLength - 2; i++) {
             const current = frequencyData[i];
             const prev1 = frequencyData[i - 1];
@@ -599,27 +640,39 @@ class ChordDetector {
             const next1 = frequencyData[i + 1];
             const next2 = frequencyData[i + 2];
             
-            // Check if this is a local maximum with sufficient prominence
+            // Relaxed peak detection for more sensitivity
             if (current > prev1 && current > next1 &&
                 current > prev2 && current > next2 &&
-                current > 64) { // Lower threshold for more sensitivity
+                current > amplitudeThreshold) {
                 
                 const frequency = i * sampleRate / (bufferLength * 2);
-                if (frequency > 65 && frequency < 1000) { // Extended range for fundamentals
-                    peaks.push({
-                        frequency: frequency,
-                        amplitude: current,
-                        bin: i
-                    });
+                
+                // Extended frequency range for better detection
+                if (frequency > 50 && frequency < 1500) { // Wider range
+                    // Calculate peak prominence
+                    const leftMin = Math.min(prev1, prev2);
+                    const rightMin = Math.min(next1, next2);
+                    const prominence = current - Math.max(leftMin, rightMin);
+                    
+                    // Include even weak peaks for studio audio
+                    if (prominence > 8) { // Lower prominence threshold
+                        peaks.push({
+                            frequency: frequency,
+                            amplitude: current,
+                            bin: i,
+                            prominence: prominence
+                        });
+                    }
                 }
             }
         }
         
-        // Sort by amplitude and filter harmonics
+        // Sort by amplitude for studio audio (more reliable than prominence)
         peaks.sort((a, b) => b.amplitude - a.amplitude);
         const fundamentals = [];
         
-        for (let i = 0; i < peaks.length && fundamentals.length < 4; i++) {
+        // More permissive harmonic filtering for studio audio
+        for (let i = 0; i < peaks.length && fundamentals.length < 8; i++) { // More peaks allowed
             const peak = peaks[i];
             let isHarmonic = false;
             
@@ -628,8 +681,17 @@ class ChordDetector {
                 const fundamental = fundamentals[j];
                 const ratio = peak.frequency / fundamental.frequency;
                 
-                // Check if this is approximately a harmonic (2x, 3x, 4x, etc.)
-                if (Math.abs(ratio - Math.round(ratio)) < 0.05) {
+                // More permissive harmonic detection for studio audio
+                if (Math.abs(ratio - Math.round(ratio)) < 0.1) { // More tolerance
+                    isHarmonic = true;
+                    break;
+                }
+                
+                // Also check if this could be the fundamental of existing harmonics
+                const inverseRatio = fundamental.frequency / peak.frequency;
+                if (Math.abs(inverseRatio - Math.round(inverseRatio)) < 0.1) {
+                    // Replace the harmonic with this fundamental
+                    fundamentals[j] = peak;
                     isHarmonic = true;
                     break;
                 }
@@ -640,9 +702,52 @@ class ChordDetector {
             }
         }
         
+        // Sort by frequency for consistent ordering
+        fundamentals.sort((a, b) => a.frequency - b.frequency);
+        
         return fundamentals.map(peak => peak.frequency);
     }
 
+    detectOnset(frequencyData) {
+        if (!this.previousSpectrum) {
+            this.previousSpectrum = new Array(frequencyData.length).fill(0);
+            return false;
+        }
+        
+        // Calculate spectral flux (difference between current and previous spectrum)
+        let spectralFlux = 0;
+        for (let i = 0; i < frequencyData.length; i++) {
+            const diff = frequencyData[i] - this.previousSpectrum[i];
+            if (diff > 0) spectralFlux += diff;
+        }
+        
+        // Normalize spectral flux
+        spectralFlux = spectralFlux / frequencyData.length;
+        
+        // Update spectral flux history
+        this.spectralFluxHistory.push(spectralFlux);
+        if (this.spectralFluxHistory.length > 10) {
+            this.spectralFluxHistory.shift();
+        }
+        
+        // Fixed low threshold for studio audio - much more sensitive
+        const onsetThreshold = 0.5; // Very low threshold for maximum sensitivity
+        
+        const currentTime = performance.now();
+        const onsetDetected = spectralFlux > onsetThreshold &&
+                             currentTime - this.lastOnsetTime > 50; // Shorter cooldown
+        
+        // Update previous spectrum
+        this.previousSpectrum = [...frequencyData];
+        
+        if (onsetDetected) {
+            this.lastOnsetTime = currentTime;
+            console.log(`Onset detected: flux=${spectralFlux.toFixed(4)}`);
+        }
+        
+        return onsetDetected;
+    }
+    
     frequencyToNoteWithOctave(frequency) {
         const A4 = 440;
         const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -657,7 +762,7 @@ class ChordDetector {
         };
     }
 
-    identifyChordWithHarmonics(notesWithOctaves, frequencies) {
+    identifyChordWithTemporalAnalysis(notesWithOctaves, frequencies) {
         if (notesWithOctaves.length < 2) return null;
         
         // Extract just the note names for chord matching
@@ -920,6 +1025,15 @@ class ChordDetector {
             if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
                 return;
             }
+
+            // Mark chord as playing for red highlight
+            this.playingChords.set(chordName, Date.now());
+            
+            // Auto-remove playing status after 0.5 seconds
+            setTimeout(() => {
+                this.playingChords.delete(chordName);
+                this.updateTicker(); // Update ticker to remove red highlight
+            }, 500);
 
             // Map chord to frequency for announcement tone
             const noteFrequencies = {
