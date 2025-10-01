@@ -21,7 +21,10 @@
     "pitchfinder": "^2.3.2"
   },
   "dependencies": {
+    "@tonaljs/chord": "^6.1.1",
+    "@tonaljs/chord-detect": "^4.9.1",
+    "@tonaljs/note": "^4.12.1",
     "meyda": "^5.2.0",
-    "tonal": "^4.6.3"
+    "tonal": "^6.4.2"
   }
 }

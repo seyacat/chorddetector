@@ -78,6 +78,14 @@
             background: #da190b;
         }
 
+        button.active {
+            background: #ff9800;
+        }
+
+        button.active:hover {
+            background: #f57c00;
+        }
+
         .chord-display {
             background: rgba(255, 255, 255, 0.15);
             padding: 40px;
@@ -229,6 +237,18 @@
                 <label style="display: block; margin-bottom: 5px;">Salida de Audio con Anuncios:</label>
                 <button id="enableAudioOutput">Activar Salida</button>
                 <button id="disableAudioOutput" class="stop hidden">Desactivar</button>
+            </div>
+            <div class="multi-chord-control" style="margin-top: 15px;">
+                <button id="multiChordBtn">Activar Multi-Acorde</button>
+                <div style="font-size: 0.9em; opacity: 0.8; margin-top: 5px;">
+                    Analiza graves, medios y agudos por separado
+                </div>
+            </div>
+            <div class="announcement-control" style="margin-top: 15px;">
+                <button id="announcementBtn">Activar Anuncios de Audio</button>
+                <div style="font-size: 0.9em; opacity: 0.8; margin-top: 5px;">
+                    Reproduce acordes detectados con 2 segundos de retraso
+                </div>
             </div>
         </div>
 

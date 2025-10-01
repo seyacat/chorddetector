@@ -7,12 +7,17 @@ class ChordDetector {
         this.isRunning = false;
         this.animationId = null;
         
-        // BPM detection variables
-        this.beatHistory = [];
-        this.lastBeatTime = 0;
-        this.bpm = 120; // Default BPM
-        this.sampleInterval = 0;
-        this.lastSampleTime = 0;
+        // Chord stabilization variables
+        this.lastChordDetectionTime = 0;
+        this.minDetectionInterval = 100; // Minimum time between detections (ms)
+        this.chordVotes = new Map(); // Track chord votes over time
+        this.multiChordVotes = new Map(); // Track multiple chords by frequency range
+        this.votingWindow = 500; // 500ms voting window
+        this.stableChordThreshold = 0.6; // 60% of votes needed to confirm chord
+        this.currentStableChord = null;
+        this.currentMultiChords = []; // Array for multiple chords
+        this.lastStableChordTime = 0;
+        this.multiChordMode = true; // Always enabled for multi-chord detection
         
         // Ticker variables
         this.lastChord = null;
@@ -47,8 +52,8 @@ class ChordDetector {
         this.spectralFluxHistory = [];
         this.lastOnsetTime = 0;
         
-        // New improved chord detector
-        this.improvedDetector = null;
+        // Browser chord detector (compatible with Electron)
+        this.browserDetector = null;
         
         this.initializeElements();
         this.loadAudioDevices();
@@ -94,10 +99,15 @@ class ChordDetector {
         this.canvasContext = this.canvas.getContext('2d');
         this.enableAudioOutputBtn = document.getElementById('enableAudioOutput');
         this.disableAudioOutputBtn = document.getElementById('disableAudioOutput');
+        this.multiChordBtn = document.getElementById('multiChordBtn');
+        this.announcementBtn = document.getElementById('announcementBtn');
         
         // Set canvas dimensions
         this.canvas.width = this.canvas.offsetWidth;
         this.canvas.height = this.canvas.offsetHeight;
+        
+        // Initialize multi-chord button state
+        this.updateMultiChordButton();
     }
 
     async loadAudioDevices() {
@@ -139,46 +149,32 @@ class ChordDetector {
     }
 
     setupEventListeners() {
-        console.log('setupEventListeners: Setting up event listeners');
-        
         this.startBtn.addEventListener('click', () => this.startDetection());
         this.stopBtn.addEventListener('click', () => this.stopDetection());
         this.audioInput.addEventListener('change', () => this.onDeviceChange());
         this.audioOutput.addEventListener('change', () => this.onDeviceChange());
         this.enableAudioOutputBtn.addEventListener('click', () => this.enableAudioOutput());
         this.disableAudioOutputBtn.addEventListener('click', () => this.disableAudioOutput());
-        
-        // Debug event listener for audioOutput
-        this.audioOutput.addEventListener('change', (event) => {
-            console.log('DEBUG: audioOutput change event fired', event.target.value);
-            this.onDeviceChange();
-        });
-        
-        console.log('setupEventListeners: Event listeners set up successfully');
-        console.log('audioInput:', this.audioInput);
-        console.log('audioOutput:', this.audioOutput);
+        this.multiChordBtn.addEventListener('click', () => this.toggleMultiChordMode());
+        this.announcementBtn.addEventListener('click', () => this.toggleAnnouncements());
     }
 
     setupVisibilityHandlers() {
         // Handle page visibility changes to prevent AudioContext suspension
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
-                console.log('Page hidden - handling AudioContext suspension');
                 this.handlePageHidden();
             } else {
-                console.log('Page visible - resuming AudioContext if needed');
                 this.handlePageVisible();
             }
         });
 
         // Handle window focus/blur events
         window.addEventListener('blur', () => {
-            console.log('Window lost focus - handling AudioContext suspension');
             this.handlePageHidden();
         });
 
         window.addEventListener('focus', () => {
-            console.log('Window gained focus - resuming AudioContext if needed');
             this.handlePageVisible();
         });
     }
@@ -186,26 +182,22 @@ class ChordDetector {
     async handlePageHidden() {
         // When page loses focus, we don't need to do anything special
         // The AudioContext will automatically suspend, but we'll resume it when needed
-        console.log('handlePageHidden: Page is hidden');
     }
 
     async handlePageVisible() {
         // When page becomes visible again, resume AudioContext if it was suspended
         if (this.audioContext && this.audioContext.state === 'suspended') {
             try {
-                console.log('handlePageVisible: Resuming suspended AudioContext');
                 await this.audioContext.resume();
-                console.log('handlePageVisible: AudioContext resumed successfully');
                 
                 // If audio output was enabled, restart it
                 if (this.audioOutputEnabled) {
-                    console.log('handlePageVisible: Restarting audio output');
                     setTimeout(() => {
                         this.enableAudioOutput();
                     }, 100);
                 }
             } catch (error) {
-                console.error('handlePageVisible: Error resuming AudioContext:', error);
+                // Silently handle error
             }
         }
     }
@@ -213,8 +205,6 @@ class ChordDetector {
     onDeviceChange() {
         const inputDeviceId = this.audioInput.value;
         const outputDeviceId = this.audioOutput.value;
-        
-        console.log(`onDeviceChange: input=${inputDeviceId}, output=${outputDeviceId}, running=${this.isRunning}, outputEnabled=${this.audioOutputEnabled}`);
         
         // Save the selected devices
         if (inputDeviceId) {
@@ -231,22 +221,18 @@ class ChordDetector {
         // Handle input device change (only if input was changed)
         if (!isOutputChange && inputDeviceId && this.isRunning) {
             // If already running and input device changed, restart with new device
-            console.log('onDeviceChange: Restarting detection with new input device');
             this.stopDetection();
             setTimeout(() => this.startDetection(), 100);
         } else if (!isOutputChange && inputDeviceId && !this.isRunning) {
             // If not running and input device selected, start automatically
-            console.log('onDeviceChange: Starting detection with new input device');
             this.startDetection();
         }
         
         // Handle output device change - SIMPLIFIED LOGIC
         if (outputDeviceId && this.isRunning) {
             // If running and output device selected, enable/restart output
-            console.log('onDeviceChange: Enabling/restarting audio output');
             if (this.audioOutputEnabled) {
                 // If already enabled, update output device
-                console.log('onDeviceChange: Output already enabled, updating device');
                 this.updateOutputDevice();
             } else {
                 // If not enabled, enable it
@@ -254,7 +240,6 @@ class ChordDetector {
             }
         } else if (!outputDeviceId && this.audioOutputEnabled) {
             // If output device deselected while enabled, disable
-            console.log('onDeviceChange: Disabling audio output (device deselected)');
             this.disableAudioOutput();
         }
     }
@@ -307,9 +292,6 @@ class ChordDetector {
             
             this.analyser.fftSize = 2048;
             this.analyser.smoothingTimeConstant = 0.8;
-            
-            // Initialize improved chord detector
-            this.improvedDetector = new ImprovedChordDetector(this);
             
             this.isRunning = true;
             this.startBtn.classList.add('hidden');
@@ -367,6 +349,87 @@ class ChordDetector {
         this.status.className = 'status';
     }
 
+    toggleMultiChordMode() {
+        this.multiChordMode = !this.multiChordMode;
+        this.updateMultiChordButton();
+        
+        if (this.multiChordMode) {
+            this.status.textContent = 'Modo multi-acorde activado. Analizando graves, medios y agudos por separado.';
+            this.status.className = 'status info';
+        } else {
+            this.status.textContent = 'Modo multi-acorde desactivado. Usando detección estándar.';
+            this.status.className = 'status';
+        }
+        
+        // Clear chord buffers when switching modes
+        this.chordVotes.clear();
+        this.multiChordVotes.clear();
+        this.currentStableChord = null;
+        this.currentMultiChords = [];
+        this.chordBuffer = [];
+    }
+
+    updateMultiChordButton() {
+        if (this.multiChordMode) {
+            this.multiChordBtn.textContent = 'Desactivar Multi-Acorde';
+            this.multiChordBtn.classList.add('active');
+        } else {
+            this.multiChordBtn.textContent = 'Activar Multi-Acorde';
+            this.multiChordBtn.classList.remove('active');
+        }
+    }
+
+    updateDisplayWithMultiChords(multiChord) {
+        if (!multiChord || !multiChord.isMultiChord) {
+            this.updateDisplayWithDelayedChord(performance.now());
+            return;
+        }
+
+        // Display multiple chords with their ranges and colors
+        const chordDisplay = multiChord.chords.map((chord, index) => {
+            const color = chord.color || '#4ecdc4';
+            const rangeName = this.getRangeDisplayName(chord.range);
+            return `<span style="color: ${color}">${chord.name} (${rangeName})</span>`;
+        }).join(' / ');
+
+        this.currentChord.innerHTML = chordDisplay;
+        this.confidence.textContent = `Confianza: ${Math.round(multiChord.confidence * 100)}%`;
+        
+        // Show all detected notes from all chords
+        if (multiChord.notes && multiChord.notes.length > 0) {
+            this.detectedNotes.textContent = `Notas: ${multiChord.notes.join(', ')}`;
+        } else {
+            this.detectedNotes.textContent = 'Notas: --';
+        }
+    }
+
+    getRangeDisplayName(range) {
+        const rangeNames = {
+            'bass': 'Graves',
+            'mid': 'Medios',
+            'treble': 'Agudos'
+        };
+        return rangeNames[range] || range;
+    }
+
+    toggleAnnouncements() {
+        if (this.audioOutputEnabled) {
+            console.log('toggleAnnouncements: Disabling audio output');
+            this.disableAudioOutput();
+            this.announcementBtn.textContent = 'Activar Anuncios de Audio';
+            this.announcementBtn.classList.remove('active');
+            this.status.textContent = 'Anuncios de audio desactivados';
+            this.status.className = 'status';
+        } else {
+            console.log('toggleAnnouncements: Enabling audio output');
+            this.enableAudioOutput();
+            this.announcementBtn.textContent = 'Desactivar Anuncios de Audio';
+            this.announcementBtn.classList.add('active');
+            this.status.textContent = 'Anuncios de audio activados con 2 segundos de retraso';
+            this.status.className = 'status info';
+        }
+    }
+
     processAudio() {
         if (!this.isRunning) return;
 
@@ -387,51 +450,60 @@ class ChordDetector {
         // Draw waveform visualization
         this.drawWaveform(dataArray);
 
-        // Detect BPM and sample at appropriate intervals
+        // Improved chord detection with stabilization
         const currentTime = performance.now();
-        this.detectBPM(dataArray, currentTime);
-
-        // Update BPM display
-        this.bpmDisplay.textContent = `BPM: ${this.bpm}`;
-
-        // Sample audio based on BPM intervals
-        if (this.shouldSample(currentTime)) {
+        
+        // Detect chord with minimum interval to avoid over-processing
+        if (currentTime - this.lastChordDetectionTime > this.minDetectionInterval) {
             const chord = this.detectChord(dataArray);
             
-            if (chord) {
-                // Store chord in buffer with timestamp for 2-second delay synchronization
-                this.addChordToBuffer(chord, currentTime);
+            if (chord && chord.confidence > 0.5) { // Lower confidence threshold for better detection
+                // Add vote for this chord
+                this.addChordVote(chord.name, currentTime);
                 
-                // Update display with chord that should be playing now (after 2-second delay)
-                this.updateDisplayWithDelayedChord(currentTime);
+                // Check if we have a stable chord
+                const stableChord = this.getStableChord(currentTime);
                 
-                // Add to ticker only if chord changed
-                if (this.lastChord !== chord.name) {
-                    this.addToTicker(chord.name);
-                    this.lastChord = chord.name;
-                    this.lastDetectionTime = currentTime;
+                if (stableChord && stableChord !== this.currentStableChord) {
+                    // New stable chord detected
+                    this.currentStableChord = stableChord;
+                    this.lastStableChordTime = currentTime;
                     
+                    // Store chord in buffer with timestamp for 2-second delay synchronization
+                    this.addChordToBuffer(chord, currentTime);
+                    
+                    // Add to ticker only if chord changed
+                    if (this.lastChord !== stableChord) {
+                        this.addToTicker(stableChord);
+                        this.lastChord = stableChord;
+                        this.lastDetectionTime = currentTime;
+                        
                     // Play chord announcement if audio output is enabled
                     if (this.audioOutputEnabled) {
-                        this.playChordAnnouncement(chord.name, currentTime);
+                        this.playNotesAnnouncement(chord, currentTime);
                     }
+                    } else {
+                        // Add empty space when chord doesn't change
+                        this.addToTicker(null);
+                    }
+                } else if (stableChord) {
+                    // Same stable chord - add empty space
+                    this.addToTicker(null);
                 } else {
-                    // Add empty space when chord doesn't change
+                    // No stable chord - add empty space
                     this.addToTicker(null);
                 }
+                
+                this.lastChordDetectionTime = currentTime;
             } else {
-                // No chord detected - clear display
-                this.currentChord.textContent = '--';
-                this.detectedNotes.textContent = 'Notas: --';
-                this.confidence.textContent = 'Confianza: 0%';
-                this.lastChord = null;
-                // Add empty space when no chord detected
+                // No chord detected - add empty space to ticker
                 this.addToTicker(null);
+                this.lastChordDetectionTime = currentTime;
             }
-        } else {
-            // Update display with delayed chord even when not sampling
-            this.updateDisplayWithDelayedChord(currentTime);
         }
+        
+        // Always update display with delayed chord (continuous display update)
+        this.updateDisplayWithDelayedChord(currentTime);
 
         // Update ticker colors based on timing
         this.updateTicker();
@@ -493,82 +565,10 @@ class ChordDetector {
         this.ticker.innerHTML = tickerHTML;
     }
 
-    detectBPM(audioData, currentTime) {
-        // Calculate RMS energy in the audio signal
-        let sumSquares = 0;
-        for (let i = 0; i < audioData.length; i++) {
-            sumSquares += audioData[i] * audioData[i];
-        }
-        const rms = Math.sqrt(sumSquares / audioData.length);
-
-        // Very low threshold for studio audio - maximum sensitivity
-        let threshold = 0.005; // Much lower threshold for studio recordings
-        
-        // Beat detection with improved logic
-        if (rms > threshold && currentTime - this.lastBeatTime > 80) { // Shorter cooldown
-            // Detected a beat
-            this.lastBeatTime = currentTime;
-            this.beatHistory.push(currentTime);
-            
-            // Keep only recent beats (last 4 seconds for faster adaptation)
-            const fourSecondsAgo = currentTime - 4000;
-            this.beatHistory = this.beatHistory.filter(time => time > fourSecondsAgo);
-            
-            // Calculate BPM from beat intervals with improved accuracy
-            if (this.beatHistory.length >= 2) {
-                const intervals = [];
-                for (let i = 1; i < this.beatHistory.length; i++) {
-                    intervals.push(this.beatHistory[i] - this.beatHistory[i - 1]);
-                }
-                
-                // Calculate median interval for more robust BPM calculation
-                intervals.sort((a, b) => a - b);
-                const medianInterval = intervals[Math.floor(intervals.length / 2)];
-                
-                // Calculate BPM and ensure it's within reasonable range (40-200 BPM)
-                const calculatedBPM = Math.round(60000 / medianInterval);
-                if (calculatedBPM >= 40 && calculatedBPM <= 200) {
-                    this.bpm = calculatedBPM;
-                    
-                    // Update sample interval based on BPM (sample every beat)
-                    this.sampleInterval = 60000 / this.bpm;
-                    
-                    // Debug logging
-                    console.log(`BPM detected: ${this.bpm}, RMS: ${rms.toFixed(4)}, Beats: ${this.beatHistory.length}`);
-                }
-            }
-        }
-        
-        // If no beats detected for a while, reset to default
-        if (currentTime - this.lastBeatTime > 2000 && this.beatHistory.length > 0) { // Shorter timeout
-            this.beatHistory = [];
-            this.bpm = 120;
-            this.sampleInterval = 0;
-            console.log('BPM reset to default 120');
-        }
-        
-        // Debug: show current RMS value occasionally
-        if (Math.random() < 0.01) {
-            console.log(`Current RMS: ${rms.toFixed(4)}, Threshold: ${threshold}`);
-        }
-    }
-
-    shouldSample(currentTime) {
-        if (this.sampleInterval === 0) {
-            // If no BPM detected yet, sample every 500ms
-            if (currentTime - this.lastSampleTime > 500) {
-                this.lastSampleTime = currentTime;
-                return true;
-            }
-            return false;
-        }
-        
-        // Sample based on BPM interval
-        if (currentTime - this.lastSampleTime > this.sampleInterval) {
-            this.lastSampleTime = currentTime;
-            return true;
-        }
-        return false;
+    // BPM display is now static since we use continuous detection
+    // This method is kept for display purposes only
+    updateBPMDisplay() {
+        this.bpmDisplay.textContent = 'BPM: --';
     }
 
     drawWaveform(dataArray) {
@@ -619,16 +619,166 @@ class ChordDetector {
         const frequencyData = new Uint8Array(bufferLength);
         this.analyser.getByteFrequencyData(frequencyData);
         
-        // Use the improved chord detector if available
-        if (this.improvedDetector) {
-            console.log("Using improved chord detector...");
-            const result = this.improvedDetector.detectChord(audioData, frequencyData);
-            console.log("Improved detector result:", result);
-            return result;
+        // Use multi-chord detection by frequency ranges
+        if (this.multiChordMode) {
+            return this.detectChordsByFrequencyRanges(frequencyData);
+        } else {
+            // Always use the browser-based detection method
+            return this.fallbackChordDetection(audioData, frequencyData);
+        }
+    }
+
+    detectChordsByFrequencyRanges(frequencyData) {
+        const sampleRate = this.audioContext.sampleRate;
+        const bufferLength = frequencyData.length;
+        
+        // Define frequency ranges for analysis
+        const frequencyRanges = [
+            { name: 'bass', minFreq: 50, maxFreq: 250, color: '#ff6b6b' },      // Graves (acordes de bajo)
+            { name: 'mid', minFreq: 250, maxFreq: 1000, color: '#4ecdc4' },    // Medios (acordes principales)
+            { name: 'treble', minFreq: 1000, maxFreq: 5000, color: '#45b7d1' } // Agudos (melodía/armonías)
+        ];
+        
+        const detectedChords = [];
+        
+        // Analyze each frequency range separately
+        frequencyRanges.forEach(range => {
+            // Extract frequency data for this range
+            const rangeData = this.extractFrequencyRange(frequencyData, sampleRate, bufferLength, range.minFreq, range.maxFreq);
+            
+            if (rangeData.length > 0) {
+                // Find fundamental frequencies in this range
+                const fundamentals = this.findFundamentalFrequenciesInRange(rangeData, sampleRate, bufferLength, range.minFreq, range.maxFreq);
+                
+                if (fundamentals.length >= 2) {
+                    // Convert frequencies to notes
+                    const notesWithOctaves = fundamentals.map(freq => this.frequencyToNoteWithOctave(freq));
+                    
+                    // Identify chord for this range
+                    const chord = this.identifyChordWithTemporalAnalysis(notesWithOctaves, fundamentals);
+                    
+                    if (chord && chord.confidence > 0.4) { // Lower threshold for multi-chord detection
+                        chord.range = range.name;
+                        chord.color = range.color;
+                        detectedChords.push(chord);
+                    }
+                }
+            }
+        });
+        
+        // Return the best chord if only one detected, or multiple if available
+        if (detectedChords.length === 0) {
+            return null;
+        } else if (detectedChords.length === 1) {
+            return detectedChords[0];
+        } else {
+            // Return multiple chords sorted by confidence
+            detectedChords.sort((a, b) => b.confidence - a.confidence);
+            return {
+                name: detectedChords.map(c => c.name).join(' / '),
+                confidence: Math.max(...detectedChords.map(c => c.confidence)),
+                notes: detectedChords.flatMap(c => c.notes || []),
+                ranges: detectedChords.map(c => c.range),
+                colors: detectedChords.map(c => c.color),
+                isMultiChord: true,
+                chords: detectedChords
+            };
+        }
+    }
+
+    extractFrequencyRange(frequencyData, sampleRate, bufferLength, minFreq, maxFreq) {
+        const rangeData = new Uint8Array(bufferLength);
+        const minBin = Math.floor(minFreq * bufferLength * 2 / sampleRate);
+        const maxBin = Math.floor(maxFreq * bufferLength * 2 / sampleRate);
+        
+        // Copy only the frequency bins within the specified range
+        for (let i = 0; i < bufferLength; i++) {
+            if (i >= minBin && i <= maxBin) {
+                rangeData[i] = frequencyData[i];
+            } else {
+                rangeData[i] = 0;
+            }
         }
         
-        console.log("Improved detector not available, using fallback");
-        // Fallback to original detection if improved detector is not available
+        return rangeData;
+    }
+
+    findFundamentalFrequenciesInRange(frequencyData, sampleRate, bufferLength, minFreq, maxFreq) {
+        const peaks = [];
+        const amplitudeThreshold = 12; // Lower threshold for range-specific detection
+        
+        // Find peaks only within the specified frequency range
+        const minBin = Math.floor(minFreq * bufferLength * 2 / sampleRate);
+        const maxBin = Math.floor(maxFreq * bufferLength * 2 / sampleRate);
+        
+        for (let i = Math.max(2, minBin); i < Math.min(bufferLength - 2, maxBin); i++) {
+            const current = frequencyData[i];
+            const prev1 = frequencyData[i - 1];
+            const prev2 = frequencyData[i - 2];
+            const next1 = frequencyData[i + 1];
+            const next2 = frequencyData[i + 2];
+            
+            if (current > prev1 && current > next1 &&
+                current > prev2 && current > next2 &&
+                current > amplitudeThreshold) {
+                
+                const frequency = i * sampleRate / (bufferLength * 2);
+                
+                // Calculate peak prominence
+                const leftMin = Math.min(prev1, prev2);
+                const rightMin = Math.min(next1, next2);
+                const prominence = current - Math.max(leftMin, rightMin);
+                
+                if (prominence > 6) { // Lower prominence threshold for range detection
+                    peaks.push({
+                        frequency: frequency,
+                        amplitude: current,
+                        bin: i,
+                        prominence: prominence
+                    });
+                }
+            }
+        }
+        
+        // Sort by amplitude and take top peaks
+        peaks.sort((a, b) => b.amplitude - a.amplitude);
+        const fundamentals = [];
+        
+        // More permissive harmonic filtering for range-specific detection
+        for (let i = 0; i < peaks.length && fundamentals.length < 6; i++) {
+            const peak = peaks[i];
+            let isHarmonic = false;
+            
+            for (let j = 0; j < fundamentals.length; j++) {
+                const fundamental = fundamentals[j];
+                const ratio = peak.frequency / fundamental.frequency;
+                
+                if (Math.abs(ratio - Math.round(ratio)) < 0.15) { // More tolerance for range detection
+                    isHarmonic = true;
+                    break;
+                }
+                
+                const inverseRatio = fundamental.frequency / peak.frequency;
+                if (Math.abs(inverseRatio - Math.round(inverseRatio)) < 0.15) {
+                    fundamentals[j] = peak;
+                    isHarmonic = true;
+                    break;
+                }
+            }
+            
+            if (!isHarmonic) {
+                fundamentals.push(peak);
+            }
+        }
+        
+        // Sort by frequency for consistent ordering
+        fundamentals.sort((a, b) => a.frequency - b.frequency);
+        
+        return fundamentals.map(peak => peak.frequency);
+    }
+
+    fallbackChordDetection(audioData, frequencyData) {
+        // Original chord detection method that worked before
         const hasOnset = this.detectOnset(frequencyData);
         const currentTime = performance.now();
         const shouldAnalyze = hasOnset || this.shouldSample(currentTime);
@@ -640,6 +790,11 @@ class ChordDetector {
         const fundamentals = this.findFundamentalFrequencies(frequencyData);
         const notesWithOctaves = fundamentals.map(freq => this.frequencyToNoteWithOctave(freq));
         return this.identifyChordWithTemporalAnalysis(notesWithOctaves, fundamentals);
+    }
+
+    shouldSample(currentTime) {
+        // Sample every 500ms if no onset detected
+        return currentTime - this.lastChordDetectionTime > 500;
     }
 
     findFundamentalFrequencies(frequencyData) {
@@ -760,7 +915,6 @@ class ChordDetector {
         
         if (onsetDetected) {
             this.lastOnsetTime = currentTime;
-            console.log(`Onset detected: flux=${spectralFlux.toFixed(4)}`);
         }
         
         return onsetDetected;
@@ -981,29 +1135,16 @@ class ChordDetector {
 
     disableAudioOutput() {
         if (this.audioOutputEnabled) {
-            console.log('disableAudioOutput: Disabling audio output');
+            console.log('disableAudioOutput: Disabling chord announcements only');
             
-            // Disconnect delay chain
-            if (this.delayNode) {
-                this.delayNode.disconnect();
-                this.delayNode = null;
-            }
-            if (this.delayGain) {
-                this.delayGain.disconnect();
-                this.delayGain = null;
-            }
-            
-            // Reconnect source directly to analyser (no delay)
-            if (this.source && this.analyser) {
-                this.source.disconnect();
-                this.source.connect(this.analyser);
-            }
-            
-            // Silencia el oscilador en lugar de detenerlo
+            // Solo silencia el oscilador de acordes, mantiene el audio original
             if (this.announcementGain) {
                 this.announcementGain.gain.cancelScheduledValues(this.audioContext.currentTime);
                 this.announcementGain.gain.setValueAtTime(0, this.audioContext.currentTime);
             }
+            
+            // NO desconectamos el delay chain para mantener el audio original
+            // El audio de entrada sigue reproduciéndose normalmente
             
             this.audioOutputEnabled = false;
             this.lastAnnouncedChord = null;
@@ -1012,7 +1153,7 @@ class ChordDetector {
             this.enableAudioOutputBtn.classList.add('hidden');
             this.disableAudioOutputBtn.classList.add('hidden');
             
-            this.status.textContent = 'Audio con retraso desactivado';
+            this.status.textContent = 'Anuncios de acordes desactivados - Audio original sigue reproduciéndose';
             this.status.className = 'status';
         }
     }
@@ -1054,12 +1195,19 @@ class ChordDetector {
             this.currentChord.textContent = chordToDisplay.name;
             this.confidence.textContent = `Confianza: ${Math.round(chordToDisplay.confidence * 100)}%`;
             
-            // Update detected notes display
-            if (chordToDisplay.notes && chordToDisplay.notes.length > 0) {
-                this.detectedNotes.textContent = `Notas: ${chordToDisplay.notes.join(', ')}`;
-            } else {
-                this.detectedNotes.textContent = 'Notas: --';
-            }
+                // Update detected notes display with octaves
+                if (chordToDisplay.notes && chordToDisplay.notes.length > 0) {
+                    // Get the full notes array with octaves from the chord buffer
+                    const chordData = this.chordBuffer.find(data => data.chord === chordToDisplay);
+                    if (chordData && chordData.chord.fullNotes) {
+                        const notesWithOctaves = chordData.chord.fullNotes.map(n => `${n.note}${n.octave}`);
+                        this.detectedNotes.textContent = `Notas: ${notesWithOctaves.join(', ')}`;
+                    } else {
+                        this.detectedNotes.textContent = `Notas: ${chordToDisplay.notes.join(', ')}`;
+                    }
+                } else {
+                    this.detectedNotes.textContent = 'Notas: --';
+                }
             
             this.currentDisplayedChord = chordToDisplay;
         } else if (this.currentDisplayedChord) {
@@ -1078,6 +1226,267 @@ class ChordDetector {
             this.detectedNotes.textContent = 'Notas: --';
             this.confidence.textContent = 'Confianza: 0%';
         }
+    }
+
+    addChordVote(chordName, currentTime) {
+        // Add vote for this chord
+        if (!this.chordVotes.has(chordName)) {
+            this.chordVotes.set(chordName, []);
+        }
+        
+        const votes = this.chordVotes.get(chordName);
+        votes.push(currentTime);
+        
+        // Clean old votes (keep only votes from the voting window)
+        const cutoffTime = currentTime - this.votingWindow;
+        const recentVotes = votes.filter(time => time > cutoffTime);
+        this.chordVotes.set(chordName, recentVotes);
+    }
+
+    getStableChord(currentTime) {
+        let bestChord = null;
+        let bestVoteCount = 0;
+        let totalVotes = 0;
+        
+        // Count total votes in the voting window
+        for (const [chordName, votes] of this.chordVotes) {
+            const recentVotes = votes.filter(time => time > currentTime - this.votingWindow);
+            totalVotes += recentVotes.length;
+            
+            if (recentVotes.length > bestVoteCount) {
+                bestVoteCount = recentVotes.length;
+                bestChord = chordName;
+            }
+        }
+        
+        // Check if the best chord meets the threshold
+        if (bestChord && totalVotes > 0) {
+            const voteRatio = bestVoteCount / totalVotes;
+            if (voteRatio >= this.stableChordThreshold) {
+                return bestChord;
+            }
+        }
+        
+        return null;
+    }
+
+    playNotesAnnouncement(chord, detectionTime) {
+        if (!this.audioOutputEnabled) {
+            console.log(`playNotesAnnouncement: Audio output not enabled`);
+            return;
+        }
+
+        // Only announce if chord changed
+        if (this.lastAnnouncedChord === chord.name) {
+            console.log(`playNotesAnnouncement: Chord ${chord.name} same as last, skipping`);
+            return;
+        }
+
+        this.lastAnnouncedChord = chord.name;
+
+        // Calculate remaining delay time (2 seconds minus time already passed since detection)
+        const currentTime = performance.now();
+        const timeSinceDetection = currentTime - detectionTime;
+        const remainingDelay = Math.max(0, 2000 - timeSinceDetection); // Ensure at least 0ms delay
+        
+        console.log(`playNotesAnnouncement: Chord ${chord.name} detected at ${detectionTime}, current time ${currentTime}, time since detection ${timeSinceDetection}ms, scheduling in ${remainingDelay}ms`);
+
+        // Schedule the announcement using setTimeout for precise timing
+        setTimeout(() => {
+            if (!this.audioOutputEnabled) {
+                return;
+            }
+
+            // Mark chord as playing for red highlight
+            this.playingChords.set(chord.name, Date.now());
+            
+            // Auto-remove playing status after 0.5 seconds
+            setTimeout(() => {
+                this.playingChords.delete(chord.name);
+                this.updateTicker(); // Update ticker to remove red highlight
+            }, 500);
+
+            // Play the chord immediately (no additional delay)
+            console.log(`playNotesAnnouncement: Playing chord ${chord.name} NOW`);
+            
+            // Generate generic notes for the chord if they don't exist
+            const notesToPlay = chord.fullNotes || this.generateGenericChordNotes(chord.name);
+            this.playNotesSequentially(notesToPlay);
+            
+        }, remainingDelay);
+    }
+
+    playNotesSequentially(notes) {
+        if (!notes || notes.length === 0) {
+            console.log('playNotesSequentially: No notes to play');
+            return;
+        }
+
+        console.log(`playNotesSequentially: Playing chord with ${notes.length} notes:`, notes.map(n => `${n.note}${n.octave}`));
+
+        // Play the chord as a harmonious chord (all notes together)
+        const chordStartTime = this.audioContext.currentTime;
+        
+        // Play all notes simultaneously to create a rich chord sound
+        notes.forEach((note, index) => {
+            // Very slight delay for each note to create a richer sound (2-10ms spread)
+            const noteDelay = index * 0.002; // 2ms between note starts
+            const noteStartTime = chordStartTime + noteDelay;
+            
+            // Schedule the note with musical characteristics
+            this.scheduleSimpleChordNote(note.frequency, noteStartTime, 1.0); // 1 second duration for chord
+        });
+    }
+
+    scheduleMusicalChordNote(frequency, startTime, duration) {
+        // Create a new oscillator for each note with richer, more musical sound
+        const oscillator = this.audioContext.createOscillator();
+        const gainNode = this.audioContext.createGain();
+        
+        // Use sawtooth wave for richer harmonic content (sounds more like real instruments)
+        oscillator.type = 'sawtooth';
+        oscillator.frequency.setValueAtTime(frequency, startTime);
+        
+        // Add slight detuning for richer sound (3-5 cents) - more realistic
+        const detune = (Math.random() - 0.5) * 5; // ±2.5 cents
+        oscillator.detune.setValueAtTime(detune, startTime);
+        
+        // Create a more musical envelope with gentle attack and release
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.linearRampToValueAtTime(0.2, startTime + 0.05); // Quick attack
+        gainNode.gain.exponentialRampToValueAtTime(0.15, startTime + 0.2); // Slight decay
+        gainNode.gain.setValueAtTime(0.15, startTime + duration - 0.3); // Sustain
+        gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration - 0.1); // Gentle fade out
+        gainNode.gain.linearRampToValueAtTime(0, startTime + duration); // Complete silence
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
+        
+        // Start and stop the oscillator
+        oscillator.start(startTime);
+        oscillator.stop(startTime + duration);
+        
+        console.log(`Scheduled musical chord note: ${frequency.toFixed(1)}Hz at ${startTime.toFixed(2)}s`);
+    }
+
+    scheduleSimpleChordNote(frequency, startTime, duration) {
+        // Create a simple oscillator for each note
+        const oscillator = this.audioContext.createOscillator();
+        const gainNode = this.audioContext.createGain();
+        
+        // Use sine wave for clean sound
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(frequency, startTime);
+        
+        // Simple gain envelope
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.linearRampToValueAtTime(0.3, startTime + 0.05); // Quick attack
+        gainNode.gain.setValueAtTime(0.3, startTime + duration - 0.1); // Sustain
+        gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration - 0.05); // Fade out
+        gainNode.gain.linearRampToValueAtTime(0, startTime + duration); // Complete silence
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
+        
+        // Start and stop the oscillator
+        oscillator.start(startTime);
+        oscillator.stop(startTime + duration);
+        
+        console.log(`Scheduled simple chord note: ${frequency.toFixed(1)}Hz at ${startTime.toFixed(2)}s`);
+    }
+
+    scheduleChordNote(frequency, startTime, duration) {
+        // Create a new oscillator for each note with richer sound
+        const oscillator = this.audioContext.createOscillator();
+        const gainNode = this.audioContext.createGain();
+        
+        // Use triangle wave for softer, more musical sound
+        oscillator.type = 'triangle';
+        oscillator.frequency.setValueAtTime(frequency, startTime);
+        
+        // Add slight detuning for richer sound (1-2 cents)
+        const detune = (Math.random() - 0.5) * 2; // ±1 cent
+        oscillator.detune.setValueAtTime(detune, startTime);
+        
+        // Configure gain envelope for musical chord sound
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.linearRampToValueAtTime(0.15, startTime + 0.1); // Gentle attack
+        gainNode.gain.setValueAtTime(0.15, startTime + duration - 0.2); // Sustain
+        gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration - 0.05); // Gentle fade out
+        gainNode.gain.linearRampToValueAtTime(0, startTime + duration); // Complete silence
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
+        
+        // Start and stop the oscillator
+        oscillator.start(startTime);
+        oscillator.stop(startTime + duration);
+        
+        console.log(`Scheduled chord note: ${frequency.toFixed(1)}Hz at ${startTime.toFixed(2)}s`);
+    }
+
+    generateGenericChordNotes(chordName) {
+        // Generate generic notes for common chords (root, third, fifth)
+        const chordNotes = {
+            // Major chords
+            'C': ['C4', 'E4', 'G4'],
+            'C#': ['C#4', 'F4', 'G#4'],
+            'D': ['D4', 'F#4', 'A4'],
+            'D#': ['D#4', 'G4', 'A#4'],
+            'E': ['E4', 'G#4', 'B4'],
+            'F': ['F4', 'A4', 'C5'],
+            'F#': ['F#4', 'A#4', 'C#5'],
+            'G': ['G4', 'B4', 'D5'],
+            'G#': ['G#4', 'C5', 'D#5'],
+            'A': ['A4', 'C#5', 'E5'],
+            'A#': ['A#4', 'D5', 'F5'],
+            'B': ['B4', 'D#5', 'F#5'],
+            
+            // Minor chords
+            'Cm': ['C4', 'Eb4', 'G4'],
+            'C#m': ['C#4', 'E4', 'G#4'],
+            'Dm': ['D4', 'F4', 'A4'],
+            'D#m': ['D#4', 'F#4', 'A#4'],
+            'Em': ['E4', 'G4', 'B4'],
+            'Fm': ['F4', 'Ab4', 'C5'],
+            'F#m': ['F#4', 'A4', 'C#5'],
+            'Gm': ['G4', 'Bb4', 'D5'],
+            'G#m': ['G#4', 'B4', 'D#5'],
+            'Am': ['A4', 'C5', 'E5'],
+            'A#m': ['A#4', 'C#5', 'F5'],
+            'Bm': ['B4', 'D5', 'F#5']
+        };
+
+        const notes = chordNotes[chordName] || ['C4', 'E4', 'G4']; // Default to C major
+        
+        // Convert note strings to frequency objects
+        return notes.map(noteString => {
+            const note = noteString.slice(0, -1); // Remove octave
+            const octave = parseInt(noteString.slice(-1));
+            const frequency = this.noteToFrequency(note, octave);
+            
+            return {
+                note: note,
+                octave: octave,
+                frequency: frequency
+            };
+        });
+    }
+
+    noteToFrequency(note, octave) {
+        // Standard note frequencies (A4 = 440Hz)
+        const noteFrequencies = {
+            'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13,
+            'E': 329.63, 'F': 349.23, 'F#': 369.99, 'G': 392.00,
+            'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88
+        };
+        
+        const baseFrequency = noteFrequencies[note] || 440;
+        const octaveDifference = octave - 4;
+        return baseFrequency * Math.pow(2, octaveDifference);
     }
 
     playChordAnnouncement(chordName, detectionTime) {
