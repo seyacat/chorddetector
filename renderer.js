@@ -7,6 +7,18 @@ class ChordDetector {
         this.isRunning = false;
         this.animationId = null;
         
+        // BPM detection variables
+        this.beatHistory = [];
+        this.lastBeatTime = 0;
+        this.bpm = 120; // Default BPM
+        this.sampleInterval = 0;
+        this.lastSampleTime = 0;
+        
+        // Ticker variables
+        this.lastChord = null;
+        this.tickerItems = [];
+        this.maxTickerItems = 15;
+        
         this.initializeElements();
         this.loadAudioDevices();
         this.setupEventListeners();
@@ -30,6 +42,8 @@ class ChordDetector {
         this.stopBtn = document.getElementById('stopBtn');
         this.currentChord = document.getElementById('currentChord');
         this.confidence = document.getElementById('confidence');
+        this.bpmDisplay = document.getElementById('bpmDisplay');
+        this.ticker = document.getElementById('ticker');
         this.status = document.getElementById('status');
         this.canvas = document.getElementById('waveformCanvas');
         this.canvasContext = this.canvas.getContext('2d');
@@ -160,6 +174,10 @@ class ChordDetector {
         this.stopBtn.classList.add('hidden');
         this.currentChord.textContent = '--';
         this.confidence.textContent = 'Confianza: 0%';
+        this.bpmDisplay.textContent = 'BPM: --';
+        this.ticker.innerHTML = '';
+        this.tickerItems = [];
+        this.lastChord = null;
         this.status.textContent = 'Detección detenida';
         this.status.className = 'status';
     }
@@ -174,17 +192,120 @@ class ChordDetector {
         // Draw waveform visualization
         this.drawWaveform(dataArray);
 
-        const chord = this.detectChord(dataArray);
-        
-        if (chord) {
-            this.currentChord.textContent = chord.name;
-            this.confidence.textContent = `Confianza: ${Math.round(chord.confidence * 100)}%`;
-        } else {
-            this.currentChord.textContent = '--';
-            this.confidence.textContent = 'Confianza: 0%';
+        // Detect BPM and sample at appropriate intervals
+        const currentTime = performance.now();
+        this.detectBPM(dataArray, currentTime);
+
+        // Update BPM display
+        this.bpmDisplay.textContent = `BPM: ${this.bpm}`;
+
+        // Sample audio based on BPM intervals
+        if (this.shouldSample(currentTime)) {
+            const chord = this.detectChord(dataArray);
+            
+            if (chord) {
+                this.currentChord.textContent = chord.name;
+                this.confidence.textContent = `Confianza: ${Math.round(chord.confidence * 100)}%`;
+                
+                // Add to ticker only if chord changed
+                if (this.lastChord !== chord.name) {
+                    this.addToTicker(chord.name);
+                    this.lastChord = chord.name;
+                } else {
+                    // Add empty space when chord doesn't change
+                    this.addToTicker(null);
+                }
+            } else {
+                this.currentChord.textContent = '--';
+                this.confidence.textContent = 'Confianza: 0%';
+                this.lastChord = null;
+                // Add empty space when no chord detected
+                this.addToTicker(null);
+            }
         }
 
         this.animationId = requestAnimationFrame(() => this.processAudio());
+    }
+
+    addToTicker(chordName) {
+        // Add new item to ticker (note or empty space)
+        this.tickerItems.push({
+            chord: chordName,
+            timestamp: new Date().toLocaleTimeString()
+        });
+        
+        // Limit the number of items (keep the most recent ones)
+        if (this.tickerItems.length > this.maxTickerItems) {
+            this.tickerItems = this.tickerItems.slice(-this.maxTickerItems);
+        }
+        
+        // Update ticker display
+        this.updateTicker();
+    }
+
+    updateTicker() {
+        const tickerHTML = this.tickerItems.map(item => {
+            if (item.chord) {
+                return `<span class="ticker-item">${item.chord}</span>`;
+            } else {
+                return `<span class="ticker-empty">•</span>`;
+            }
+        }).join('');
+        
+        this.ticker.innerHTML = tickerHTML;
+    }
+
+    detectBPM(audioData, currentTime) {
+        // Calculate energy in the audio signal
+        let energy = 0;
+        for (let i = 0; i < audioData.length; i++) {
+            energy += Math.abs(audioData[i]);
+        }
+        energy /= audioData.length;
+
+        // Simple beat detection based on energy threshold
+        const threshold = 0.1; // Adjust based on audio levels
+        if (energy > threshold && currentTime - this.lastBeatTime > 200) {
+            // Detected a beat
+            this.lastBeatTime = currentTime;
+            this.beatHistory.push(currentTime);
+            
+            // Keep only recent beats (last 10 seconds)
+            const tenSecondsAgo = currentTime - 10000;
+            this.beatHistory = this.beatHistory.filter(time => time > tenSecondsAgo);
+            
+            // Calculate BPM from beat intervals
+            if (this.beatHistory.length > 2) {
+                const intervals = [];
+                for (let i = 1; i < this.beatHistory.length; i++) {
+                    intervals.push(this.beatHistory[i] - this.beatHistory[i - 1]);
+                }
+                
+                const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+                this.bpm = Math.round(60000 / avgInterval);
+                
+                // Update sample interval based on BPM (sample every beat)
+                this.sampleInterval = 60000 / this.bpm;
+            }
+        }
+    }
+
+    shouldSample(currentTime) {
+        if (this.sampleInterval === 0) {
+            // If no BPM detected yet, sample every 500ms
+            if (currentTime - this.lastSampleTime > 500) {
+                this.lastSampleTime = currentTime;
+                return true;
+            }
+            return false;
+        }
+        
+        // Sample based on BPM interval
+        if (currentTime - this.lastSampleTime > this.sampleInterval) {
+            this.lastSampleTime = currentTime;
+            return true;
+        }
+        return false;
     }
 
     drawWaveform(dataArray) {
@@ -230,65 +351,100 @@ class ChordDetector {
     }
 
     detectChord(audioData) {
-        // Use the Web Audio API's built-in FFT for better frequency analysis
+        // Use both time domain and frequency domain analysis
         const bufferLength = this.analyser.frequencyBinCount;
         const frequencyData = new Uint8Array(bufferLength);
         this.analyser.getByteFrequencyData(frequencyData);
         
-        // Find prominent frequencies (peaks) with better algorithm
-        const peaks = this.findProminentFrequencies(frequencyData);
+        // Find fundamental frequencies using harmonic analysis
+        const fundamentals = this.findFundamentalFrequencies(frequencyData);
         
-        // Convert frequencies to notes
-        const notes = peaks.map(freq => this.frequencyToNote(freq));
+        // Convert frequencies to notes with octave information
+        const notesWithOctaves = fundamentals.map(freq => this.frequencyToNoteWithOctave(freq));
         
-        // Enhanced chord detection
-        return this.identifyChord(notes);
+        // Enhanced chord detection with harmonic analysis
+        return this.identifyChordWithHarmonics(notesWithOctaves, fundamentals);
     }
 
-    findProminentFrequencies(frequencyData) {
+    findFundamentalFrequencies(frequencyData) {
         const peaks = [];
         const sampleRate = this.audioContext.sampleRate;
         const bufferLength = frequencyData.length;
         
-        // Find local maxima in frequency spectrum
-        for (let i = 1; i < bufferLength - 1; i++) {
+        // Find all local maxima
+        for (let i = 2; i < bufferLength - 2; i++) {
             const current = frequencyData[i];
-            const prev = frequencyData[i - 1];
-            const next = frequencyData[i + 1];
+            const prev1 = frequencyData[i - 1];
+            const prev2 = frequencyData[i - 2];
+            const next1 = frequencyData[i + 1];
+            const next2 = frequencyData[i + 2];
             
-            // Check if this is a local maximum and above threshold
-            if (current > prev && current > next && current > 128) {
+            // Check if this is a local maximum with sufficient prominence
+            if (current > prev1 && current > next1 &&
+                current > prev2 && current > next2 &&
+                current > 64) { // Lower threshold for more sensitivity
+                
                 const frequency = i * sampleRate / (bufferLength * 2);
-                if (frequency > 80 && frequency < 1000) { // Filter reasonable frequency range
+                if (frequency > 65 && frequency < 1000) { // Extended range for fundamentals
                     peaks.push({
                         frequency: frequency,
-                        amplitude: current
+                        amplitude: current,
+                        bin: i
                     });
                 }
             }
         }
         
-        // Sort by amplitude and take top frequencies
+        // Sort by amplitude and filter harmonics
         peaks.sort((a, b) => b.amplitude - a.amplitude);
-        return peaks.slice(0, 6).map(peak => peak.frequency);
+        const fundamentals = [];
+        
+        for (let i = 0; i < peaks.length && fundamentals.length < 4; i++) {
+            const peak = peaks[i];
+            let isHarmonic = false;
+            
+            // Check if this peak is a harmonic of an existing fundamental
+            for (let j = 0; j < fundamentals.length; j++) {
+                const fundamental = fundamentals[j];
+                const ratio = peak.frequency / fundamental.frequency;
+                
+                // Check if this is approximately a harmonic (2x, 3x, 4x, etc.)
+                if (Math.abs(ratio - Math.round(ratio)) < 0.05) {
+                    isHarmonic = true;
+                    break;
+                }
+            }
+            
+            if (!isHarmonic) {
+                fundamentals.push(peak);
+            }
+        }
+        
+        return fundamentals.map(peak => peak.frequency);
     }
 
-    frequencyToNote(frequency) {
+    frequencyToNoteWithOctave(frequency) {
         const A4 = 440;
         const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
         
         const noteNumber = 12 * (Math.log2(frequency / A4));
         const noteIndex = Math.round(noteNumber) % 12;
-        return noteNames[(noteIndex + 12) % 12];
+        const octave = Math.floor(noteNumber / 12) + 4;
+        
+        return {
+            note: noteNames[(noteIndex + 12) % 12],
+            octave: octave
+        };
     }
 
-    identifyChord(notes) {
-        if (notes.length < 2) return null;
+    identifyChordWithHarmonics(notesWithOctaves, frequencies) {
+        if (notesWithOctaves.length < 2) return null;
         
-        // Remove duplicates and sort
-        const uniqueNotes = [...new Set(notes)].sort();
+        // Extract just the note names for chord matching
+        const noteNames = notesWithOctaves.map(n => n.note);
+        const uniqueNotes = [...new Set(noteNames)].sort();
         
-        // Enhanced chord patterns with more chords
+        // Enhanced chord patterns with better confidence calculation
         const chordPatterns = {
             // Major chords
             'C,E,G': { name: 'C', confidence: 0.9 },
@@ -316,25 +472,7 @@ class ChordDetector {
             'G#,B,D#': { name: 'G#m', confidence: 0.8 },
             'A,C,E': { name: 'Am', confidence: 0.8 },
             'A#,C#,F': { name: 'A#m', confidence: 0.8 },
-            'B,D,F#': { name: 'Bm', confidence: 0.8 },
-            
-            // 7th chords
-            'C,E,G,Bb': { name: 'C7', confidence: 0.7 },
-            'D,F#,A,C': { name: 'D7', confidence: 0.7 },
-            'E,G#,B,D': { name: 'E7', confidence: 0.7 },
-            'F,A,C,Eb': { name: 'F7', confidence: 0.7 },
-            'G,B,D,F': { name: 'G7', confidence: 0.7 },
-            'A,C#,E,G': { name: 'A7', confidence: 0.7 },
-            'B,D#,F#,A': { name: 'B7', confidence: 0.7 },
-            
-            // Major 7th chords
-            'C,E,G,B': { name: 'Cmaj7', confidence: 0.7 },
-            'D,F#,A,C#': { name: 'Dmaj7', confidence: 0.7 },
-            'E,G#,B,D#': { name: 'Emaj7', confidence: 0.7 },
-            'F,A,C,E': { name: 'Fmaj7', confidence: 0.7 },
-            'G,B,D,F#': { name: 'Gmaj7', confidence: 0.7 },
-            'A,C#,E,G#': { name: 'Amaj7', confidence: 0.7 },
-            'B,D#,F#,A#': { name: 'Bmaj7', confidence: 0.7 }
+            'B,D,F#': { name: 'Bm', confidence: 0.8 }
         };
         
         const noteString = uniqueNotes.join(',');
@@ -343,22 +481,22 @@ class ChordDetector {
             return chordPatterns[noteString];
         }
         
-        // Try to match with 3-note combinations if we have more notes
-        if (uniqueNotes.length > 3) {
-            for (let i = 0; i < uniqueNotes.length; i++) {
-                for (let j = i + 1; j < uniqueNotes.length; j++) {
-                    for (let k = j + 1; k < uniqueNotes.length; k++) {
-                        const threeNotes = [uniqueNotes[i], uniqueNotes[j], uniqueNotes[k]].sort();
-                        const threeNoteString = threeNotes.join(',');
-                        if (chordPatterns[threeNoteString]) {
-                            return chordPatterns[threeNoteString];
-                        }
-                    }
+        // Try partial matches (2 out of 3 notes)
+        if (uniqueNotes.length >= 2) {
+            for (const pattern in chordPatterns) {
+                const patternNotes = pattern.split(',');
+                const matchingNotes = uniqueNotes.filter(note => patternNotes.includes(note));
+                
+                if (matchingNotes.length >= 2) {
+                    return {
+                        name: chordPatterns[pattern].name,
+                        confidence: chordPatterns[pattern].confidence * 0.7
+                    };
                 }
             }
         }
         
-        // Fallback: return first note as major chord
+        // Fallback: return most prominent note
         return {
             name: uniqueNotes[0],
             confidence: 0.3
