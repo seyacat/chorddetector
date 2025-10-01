@@ -190,8 +190,18 @@
                     <option value="">Selecciona un dispositivo de audio...</option>
                 </select>
             </div>
+            <div class="device-select" style="margin-top: 10px;">
+                <select id="audioOutput">
+                    <option value="">Selecciona salida de audio para anuncios...</option>
+                </select>
+            </div>
             <button id="startBtn" class="hidden">Iniciar Detección</button>
             <button id="stopBtn" class="stop hidden">Detener</button>
+            <div class="audio-output-control hidden" style="margin-top: 15px;">
+                <label style="display: block; margin-bottom: 5px;">Salida de Audio con Anuncios:</label>
+                <button id="enableAudioOutput">Activar Salida</button>
+                <button id="disableAudioOutput" class="stop hidden">Desactivar</button>
+            </div>
         </div>
 
         <div class="chord-display">

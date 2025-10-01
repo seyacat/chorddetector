@@ -19,25 +19,46 @@ class ChordDetector {
         this.tickerItems = [];
         this.maxTickerItems = 15;
         
+        // Audio output with delay and announcements
+        this.audioOutputEnabled = false;
+        this.delayBuffer = null;
+        this.delayTime = 1.0; // 1 second delay
+        this.lastAnnouncedChord = null;
+        this.announcementOscillator = null;
+        this.announcementGain = null;
+        
         this.initializeElements();
         this.loadAudioDevices();
         this.setupEventListeners();
+        this.setupVisibilityHandlers();
     }
 
     restoreLastDevice() {
-        const lastDeviceId = localStorage.getItem('lastAudioDevice');
-        if (lastDeviceId) {
+        const lastInputDeviceId = localStorage.getItem('lastAudioInputDevice');
+        const lastOutputDeviceId = localStorage.getItem('lastAudioOutputDevice');
+        
+        if (lastInputDeviceId) {
             setTimeout(() => {
-                this.audioInput.value = lastDeviceId;
-                if (lastDeviceId) {
+                this.audioInput.value = lastInputDeviceId;
+                if (lastInputDeviceId) {
                     this.startDetection();
                 }
             }, 100);
+        }
+        
+        if (lastOutputDeviceId) {
+            setTimeout(() => {
+                this.audioOutput.value = lastOutputDeviceId;
+                if (lastOutputDeviceId && this.isRunning) {
+                    this.enableAudioOutput();
+                }
+            }, 150);
         }
     }
 
     initializeElements() {
         this.audioInput = document.getElementById('audioInput');
+        this.audioOutput = document.getElementById('audioOutput');
         this.startBtn = document.getElementById('startBtn');
         this.stopBtn = document.getElementById('stopBtn');
         this.currentChord = document.getElementById('currentChord');
@@ -47,6 +68,8 @@ class ChordDetector {
         this.status = document.getElementById('status');
         this.canvas = document.getElementById('waveformCanvas');
         this.canvasContext = this.canvas.getContext('2d');
+        this.enableAudioOutputBtn = document.getElementById('enableAudioOutput');
+        this.disableAudioOutputBtn = document.getElementById('disableAudioOutput');
         
         // Set canvas dimensions
         this.canvas.width = this.canvas.offsetWidth;
@@ -57,16 +80,26 @@ class ChordDetector {
         try {
             await navigator.mediaDevices.getUserMedia({ audio: true });
             const devices = await navigator.mediaDevices.enumerateDevices();
-            const audioDevices = devices.filter(device => device.kind === 'audioinput');
+            const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+            const audioOutputDevices = devices.filter(device => device.kind === 'audiooutput');
             
-            audioDevices.forEach(device => {
+            // Load input devices
+            audioInputDevices.forEach(device => {
                 const option = document.createElement('option');
                 option.value = device.deviceId;
-                option.textContent = device.label || `Dispositivo de audio ${audioDevices.indexOf(device) + 1}`;
+                option.textContent = device.label || `Dispositivo de entrada ${audioInputDevices.indexOf(device) + 1}`;
                 this.audioInput.appendChild(option);
             });
             
-            if (audioDevices.length > 0) {
+            // Load output devices
+            audioOutputDevices.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.textContent = device.label || `Dispositivo de salida ${audioOutputDevices.indexOf(device) + 1}`;
+                this.audioOutput.appendChild(option);
+            });
+            
+            if (audioInputDevices.length > 0) {
                 this.status.textContent = 'Dispositivos de audio cargados. Selecciona uno para iniciar la detección automática';
                 // Restore last device after devices are loaded
                 this.restoreLastDevice();
@@ -82,25 +115,123 @@ class ChordDetector {
     }
 
     setupEventListeners() {
+        console.log('setupEventListeners: Setting up event listeners');
+        
         this.startBtn.addEventListener('click', () => this.startDetection());
         this.stopBtn.addEventListener('click', () => this.stopDetection());
         this.audioInput.addEventListener('change', () => this.onDeviceChange());
+        this.audioOutput.addEventListener('change', () => this.onDeviceChange());
+        this.enableAudioOutputBtn.addEventListener('click', () => this.enableAudioOutput());
+        this.disableAudioOutputBtn.addEventListener('click', () => this.disableAudioOutput());
+        
+        // Debug event listener for audioOutput
+        this.audioOutput.addEventListener('change', (event) => {
+            console.log('DEBUG: audioOutput change event fired', event.target.value);
+            this.onDeviceChange();
+        });
+        
+        console.log('setupEventListeners: Event listeners set up successfully');
+        console.log('audioInput:', this.audioInput);
+        console.log('audioOutput:', this.audioOutput);
+    }
+
+    setupVisibilityHandlers() {
+        // Handle page visibility changes to prevent AudioContext suspension
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                console.log('Page hidden - handling AudioContext suspension');
+                this.handlePageHidden();
+            } else {
+                console.log('Page visible - resuming AudioContext if needed');
+                this.handlePageVisible();
+            }
+        });
+
+        // Handle window focus/blur events
+        window.addEventListener('blur', () => {
+            console.log('Window lost focus - handling AudioContext suspension');
+            this.handlePageHidden();
+        });
+
+        window.addEventListener('focus', () => {
+            console.log('Window gained focus - resuming AudioContext if needed');
+            this.handlePageVisible();
+        });
+    }
+
+    async handlePageHidden() {
+        // When page loses focus, we don't need to do anything special
+        // The AudioContext will automatically suspend, but we'll resume it when needed
+        console.log('handlePageHidden: Page is hidden');
+    }
+
+    async handlePageVisible() {
+        // When page becomes visible again, resume AudioContext if it was suspended
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+            try {
+                console.log('handlePageVisible: Resuming suspended AudioContext');
+                await this.audioContext.resume();
+                console.log('handlePageVisible: AudioContext resumed successfully');
+                
+                // If audio output was enabled, restart it
+                if (this.audioOutputEnabled) {
+                    console.log('handlePageVisible: Restarting audio output');
+                    setTimeout(() => {
+                        this.enableAudioOutput();
+                    }, 100);
+                }
+            } catch (error) {
+                console.error('handlePageVisible: Error resuming AudioContext:', error);
+            }
+        }
     }
 
     onDeviceChange() {
-        const deviceId = this.audioInput.value;
-        // Save the selected device
-        if (deviceId) {
-            localStorage.setItem('lastAudioDevice', deviceId);
+        const inputDeviceId = this.audioInput.value;
+        const outputDeviceId = this.audioOutput.value;
+        
+        console.log(`onDeviceChange: input=${inputDeviceId}, output=${outputDeviceId}, running=${this.isRunning}, outputEnabled=${this.audioOutputEnabled}`);
+        
+        // Save the selected devices
+        if (inputDeviceId) {
+            localStorage.setItem('lastAudioInputDevice', inputDeviceId);
+        }
+        if (outputDeviceId) {
+            localStorage.setItem('lastAudioOutputDevice', outputDeviceId);
         }
         
-        if (deviceId && this.isRunning) {
-            // If already running and device changed, restart with new device
+        // Determine which device triggered the change
+        const eventTarget = event ? event.target : null;
+        const isOutputChange = eventTarget && eventTarget.id === 'audioOutput';
+        
+        // Handle input device change (only if input was changed)
+        if (!isOutputChange && inputDeviceId && this.isRunning) {
+            // If already running and input device changed, restart with new device
+            console.log('onDeviceChange: Restarting detection with new input device');
             this.stopDetection();
             setTimeout(() => this.startDetection(), 100);
-        } else if (deviceId && !this.isRunning) {
-            // If not running and device selected, start automatically
+        } else if (!isOutputChange && inputDeviceId && !this.isRunning) {
+            // If not running and input device selected, start automatically
+            console.log('onDeviceChange: Starting detection with new input device');
             this.startDetection();
+        }
+        
+        // Handle output device change - SIMPLIFIED LOGIC
+        if (outputDeviceId && this.isRunning) {
+            // If running and output device selected, enable/restart output
+            console.log('onDeviceChange: Enabling/restarting audio output');
+            if (this.audioOutputEnabled) {
+                // If already enabled, update output device
+                console.log('onDeviceChange: Output already enabled, updating device');
+                this.updateOutputDevice();
+            } else {
+                // If not enabled, enable it
+                this.enableAudioOutput();
+            }
+        } else if (!outputDeviceId && this.audioOutputEnabled) {
+            // If output device deselected while enabled, disable
+            console.log('onDeviceChange: Disabling audio output (device deselected)');
+            this.disableAudioOutput();
         }
     }
 
@@ -129,6 +260,22 @@ class ChordDetector {
             this.stream = await navigator.mediaDevices.getUserMedia(constraints);
             
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Configure AudioContext to be more resilient to suspension
+            this.audioContext.onstatechange = () => {
+                console.log(`AudioContext state changed: ${this.audioContext.state}`);
+                if (this.audioContext.state === 'suspended' && this.isRunning) {
+                    console.log('AudioContext suspended while running - attempting to resume');
+                    setTimeout(() => {
+                        if (this.audioContext && this.audioContext.state === 'suspended') {
+                            this.audioContext.resume().catch(err => {
+                                console.warn('Failed to resume AudioContext:', err);
+                            });
+                        }
+                    }, 100);
+                }
+            };
+            
             this.analyser = this.audioContext.createAnalyser();
             
             this.source = this.audioContext.createMediaStreamSource(this.stream);
@@ -160,6 +307,9 @@ class ChordDetector {
             this.animationId = null;
         }
         
+        // Clean up audio output resources
+        this.disableAudioOutput();
+        
         if (this.stream) {
             this.stream.getTracks().forEach(track => track.stop());
             this.stream = null;
@@ -178,12 +328,23 @@ class ChordDetector {
         this.ticker.innerHTML = '';
         this.tickerItems = [];
         this.lastChord = null;
+        this.lastAnnouncedChord = null;
         this.status.textContent = 'Detección detenida';
         this.status.className = 'status';
     }
 
     processAudio() {
         if (!this.isRunning) return;
+
+        // Check if AudioContext is suspended and try to resume it
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+            console.log('processAudio: AudioContext is suspended, attempting to resume');
+            this.audioContext.resume().then(() => {
+                console.log('processAudio: AudioContext resumed successfully');
+            }).catch(err => {
+                console.warn('processAudio: Failed to resume AudioContext:', err);
+            });
+        }
 
         const bufferLength = this.analyser.frequencyBinCount;
         const dataArray = new Float32Array(bufferLength);
@@ -211,6 +372,11 @@ class ChordDetector {
                 if (this.lastChord !== chord.name) {
                     this.addToTicker(chord.name);
                     this.lastChord = chord.name;
+                    
+                    // Play chord announcement if audio output is enabled
+                    if (this.audioOutputEnabled) {
+                        this.playChordAnnouncement(chord.name);
+                    }
                 } else {
                     // Add empty space when chord doesn't change
                     this.addToTicker(null);
@@ -256,37 +422,62 @@ class ChordDetector {
     }
 
     detectBPM(audioData, currentTime) {
-        // Calculate energy in the audio signal
-        let energy = 0;
+        // Calculate RMS energy in the audio signal
+        let sumSquares = 0;
         for (let i = 0; i < audioData.length; i++) {
-            energy += Math.abs(audioData[i]);
+            sumSquares += audioData[i] * audioData[i];
         }
-        energy /= audioData.length;
+        const rms = Math.sqrt(sumSquares / audioData.length);
 
-        // Simple beat detection based on energy threshold
-        const threshold = 0.1; // Adjust based on audio levels
-        if (energy > threshold && currentTime - this.lastBeatTime > 200) {
+        // Adaptive threshold - start with very low threshold and adjust dynamically
+        let threshold = 0.02; // Very low threshold for maximum sensitivity
+        
+        // Beat detection with improved logic
+        if (rms > threshold && currentTime - this.lastBeatTime > 100) {
             // Detected a beat
             this.lastBeatTime = currentTime;
             this.beatHistory.push(currentTime);
             
-            // Keep only recent beats (last 10 seconds)
-            const tenSecondsAgo = currentTime - 10000;
-            this.beatHistory = this.beatHistory.filter(time => time > tenSecondsAgo);
+            // Keep only recent beats (last 6 seconds for faster adaptation)
+            const sixSecondsAgo = currentTime - 6000;
+            this.beatHistory = this.beatHistory.filter(time => time > sixSecondsAgo);
             
-            // Calculate BPM from beat intervals
-            if (this.beatHistory.length > 2) {
+            // Calculate BPM from beat intervals with improved accuracy
+            if (this.beatHistory.length >= 2) {
                 const intervals = [];
                 for (let i = 1; i < this.beatHistory.length; i++) {
                     intervals.push(this.beatHistory[i] - this.beatHistory[i - 1]);
                 }
                 
-                const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-                this.bpm = Math.round(60000 / avgInterval);
+                // Calculate median interval for more robust BPM calculation
+                intervals.sort((a, b) => a - b);
+                const medianInterval = intervals[Math.floor(intervals.length / 2)];
                 
-                // Update sample interval based on BPM (sample every beat)
-                this.sampleInterval = 60000 / this.bpm;
+                // Calculate BPM and ensure it's within reasonable range (40-200 BPM)
+                const calculatedBPM = Math.round(60000 / medianInterval);
+                if (calculatedBPM >= 40 && calculatedBPM <= 200) {
+                    this.bpm = calculatedBPM;
+                    
+                    // Update sample interval based on BPM (sample every beat)
+                    this.sampleInterval = 60000 / this.bpm;
+                    
+                    // Debug logging
+                    console.log(`BPM detected: ${this.bpm}, RMS: ${rms.toFixed(4)}, Beats: ${this.beatHistory.length}`);
+                }
             }
+        }
+        
+        // If no beats detected for a while, reset to default
+        if (currentTime - this.lastBeatTime > 3000 && this.beatHistory.length > 0) {
+            this.beatHistory = [];
+            this.bpm = 120;
+            this.sampleInterval = 0;
+            console.log('BPM reset to default 120');
+        }
+        
+        // Debug: show current RMS value occasionally
+        if (Math.random() < 0.01) {
+            console.log(`Current RMS: ${rms.toFixed(4)}, Threshold: ${threshold}`);
         }
     }
 
@@ -501,6 +692,196 @@ class ChordDetector {
             name: uniqueNotes[0],
             confidence: 0.3
         };
+    }
+
+    async enableAudioOutput() {
+        if (!this.isRunning) {
+            console.log('enableAudioOutput: Not running, skipping');
+            return; // Silently return if not running
+        }
+
+        try {
+            console.log('enableAudioOutput: Starting...');
+            
+            // Get selected output device
+            const outputDeviceId = this.audioOutput.value;
+            if (!outputDeviceId) {
+                console.log('enableAudioOutput: No output device selected');
+                this.status.textContent = 'Selecciona un dispositivo de salida primero';
+                this.status.className = 'status error';
+                return;
+            }
+            
+            // Only create new oscillator if one doesn't exist
+            if (!this.announcementOscillator) {
+                console.log('enableAudioOutput: Creating new oscillator');
+                
+                // Create announcement oscillator and gain
+                this.announcementOscillator = this.audioContext.createOscillator();
+                this.announcementGain = this.audioContext.createGain();
+                
+                // Configure oscillator
+                this.announcementOscillator.type = 'sine';
+                this.announcementOscillator.frequency.setValueAtTime(440, this.audioContext.currentTime); // Default A4
+                
+                // Configure gain - start silent
+                this.announcementGain.gain.setValueAtTime(0, this.audioContext.currentTime);
+                
+                // Connect nodes
+                this.announcementOscillator.connect(this.announcementGain);
+                
+                // Set output device using setSinkId
+                try {
+                    await this.audioContext.setSinkId(outputDeviceId);
+                    console.log('enableAudioOutput: Output device set to:', outputDeviceId);
+                } catch (error) {
+                    console.warn('enableAudioOutput: setSinkId not supported, using default device:', error);
+                }
+                
+                // Connect to audio context destination (now with correct sink)
+                this.announcementGain.connect(this.audioContext.destination);
+                
+                // Start oscillator (it will be silent until we adjust gain)
+                this.announcementOscillator.start();
+                console.log('enableAudioOutput: Oscillator started');
+            } else {
+                console.log('enableAudioOutput: Using existing oscillator');
+                
+                // Update output device for existing oscillator
+                try {
+                    await this.audioContext.setSinkId(outputDeviceId);
+                    console.log('enableAudioOutput: Updated output device to:', outputDeviceId);
+                } catch (error) {
+                    console.warn('enableAudioOutput: setSinkId not supported:', error);
+                }
+            }
+            
+            this.audioOutputEnabled = true;
+            
+            // Hide manual buttons since it's now automatic
+            this.enableAudioOutputBtn.classList.add('hidden');
+            this.disableAudioOutputBtn.classList.add('hidden');
+            
+            console.log('enableAudioOutput: Successfully enabled');
+            this.status.textContent = 'Anuncios de acordes activados automáticamente';
+            this.status.className = 'status info';
+            
+            // Test tone to verify audio is working
+            setTimeout(() => {
+                if (this.audioOutputEnabled) {
+                    console.log('enableAudioOutput: Testing audio with test tone');
+                    this.playTestTone();
+                }
+            }, 500);
+            
+        } catch (error) {
+            console.error('Error enabling audio output:', error);
+            this.status.textContent = 'Error al activar anuncios de audio: ' + error.message;
+            this.status.className = 'status error';
+        }
+    }
+
+    playTestTone() {
+        if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
+            return;
+        }
+        
+        console.log('playTestTone: Playing test tone');
+        
+        const now = this.audioContext.currentTime;
+        this.announcementOscillator.frequency.setValueAtTime(440, now); // A4
+        this.announcementGain.gain.cancelScheduledValues(now);
+        this.announcementGain.gain.setValueAtTime(0.3, now);
+        this.announcementGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4); // Fade out over 0.4 seconds
+        this.announcementGain.gain.linearRampToValueAtTime(0, now + 0.5); // Ensure complete silence at 0.5 seconds
+    }
+
+    async updateOutputDevice() {
+        if (!this.audioOutputEnabled || !this.audioContext) {
+            return;
+        }
+        
+        const outputDeviceId = this.audioOutput.value;
+        if (!outputDeviceId) {
+            return;
+        }
+        
+        try {
+            await this.audioContext.setSinkId(outputDeviceId);
+            console.log('updateOutputDevice: Output device updated to:', outputDeviceId);
+            
+            // Test tone to verify audio is working on new device
+            setTimeout(() => {
+                if (this.audioOutputEnabled) {
+                    console.log('updateOutputDevice: Testing audio with test tone');
+                    this.playTestTone();
+                }
+            }, 100);
+        } catch (error) {
+            console.warn('updateOutputDevice: setSinkId not supported:', error);
+        }
+    }
+
+    disableAudioOutput() {
+        if (this.audioOutputEnabled) {
+            console.log('disableAudioOutput: Disabling audio output');
+            
+            // Silencia el oscilador en lugar de detenerlo
+            if (this.announcementGain) {
+                this.announcementGain.gain.cancelScheduledValues(this.audioContext.currentTime);
+                this.announcementGain.gain.setValueAtTime(0, this.audioContext.currentTime);
+            }
+            
+            this.audioOutputEnabled = false;
+            this.lastAnnouncedChord = null;
+            
+            // Hide manual buttons since it's now automatic
+            this.enableAudioOutputBtn.classList.add('hidden');
+            this.disableAudioOutputBtn.classList.add('hidden');
+            
+            this.status.textContent = 'Anuncios de acordes desactivados';
+            this.status.className = 'status';
+        }
+    }
+
+    playChordAnnouncement(chordName) {
+        if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
+            console.log(`playChordAnnouncement: Not ready - enabled: ${this.audioOutputEnabled}, osc: ${!!this.announcementOscillator}, gain: ${!!this.announcementGain}`);
+            return;
+        }
+
+        // Only announce if chord changed
+        if (this.lastAnnouncedChord === chordName) {
+            console.log(`playChordAnnouncement: Chord ${chordName} same as last, skipping`);
+            return;
+        }
+
+        this.lastAnnouncedChord = chordName;
+
+        // Map chord to frequency for announcement tone
+        const noteFrequencies = {
+            'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13,
+            'E': 329.63, 'F': 349.23, 'F#': 369.99, 'G': 392.00,
+            'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88,
+            'Cm': 261.63, 'C#m': 277.18, 'Dm': 293.66, 'D#m': 311.13,
+            'Em': 329.63, 'Fm': 349.23, 'F#m': 369.99, 'Gm': 392.00,
+            'G#m': 415.30, 'Am': 440.00, 'A#m': 466.16, 'Bm': 493.88
+        };
+
+        const frequency = noteFrequencies[chordName] || 440;
+        
+        console.log(`playChordAnnouncement: Playing chord ${chordName} at frequency ${frequency}Hz`);
+        
+        // Set oscillator type and frequency
+        this.announcementOscillator.type = 'sine';
+        this.announcementOscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+        
+        // Create a short beep sound (0.3 seconds) with clean fade-out
+        const now = this.audioContext.currentTime;
+        this.announcementGain.gain.cancelScheduledValues(now); // Cancel any previous schedules
+        this.announcementGain.gain.setValueAtTime(0.5, now); // Start at 50% volume
+        this.announcementGain.gain.exponentialRampToValueAtTime(0.001, now + 0.25); // Fade out over 0.25 seconds
+        this.announcementGain.gain.linearRampToValueAtTime(0, now + 0.3); // Ensure complete silence at 0.3 seconds
     }
 }
 

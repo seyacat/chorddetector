@@ -3,7 +3,7 @@ const path = require('path');
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
-    width: 800,
+    width: 1600,
     height: 850,
     webPreferences: {
       nodeIntegration: false,
@@ -14,9 +14,8 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
   
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools();
-  }
+  // Always open DevTools for debugging
+  mainWindow.webContents.openDevTools();
 }
 
 app.whenReady().then(createWindow);
