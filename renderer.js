@@ -22,6 +22,11 @@ class ChordDetector {
         this.lastDetectionTime = 0; // Track when chord was detected
         this.playingChords = new Map(); // Track chords currently playing (red highlight)
         
+        // Chord buffer for 2-second delay synchronization
+        this.chordBuffer = [];
+        this.maxBufferSize = 10;
+        this.currentDisplayedChord = null;
+        
         // Audio output with delay and announcements
         this.audioOutputEnabled = false;
         this.delayBuffer = null;
@@ -41,6 +46,9 @@ class ChordDetector {
         this.adaptiveThreshold = 0.02;
         this.spectralFluxHistory = [];
         this.lastOnsetTime = 0;
+        
+        // New improved chord detector
+        this.improvedDetector = null;
         
         this.initializeElements();
         this.loadAudioDevices();
@@ -77,6 +85,7 @@ class ChordDetector {
         this.startBtn = document.getElementById('startBtn');
         this.stopBtn = document.getElementById('stopBtn');
         this.currentChord = document.getElementById('currentChord');
+        this.detectedNotes = document.getElementById('detectedNotes');
         this.confidence = document.getElementById('confidence');
         this.bpmDisplay = document.getElementById('bpmDisplay');
         this.ticker = document.getElementById('ticker');
@@ -299,6 +308,9 @@ class ChordDetector {
             this.analyser.fftSize = 2048;
             this.analyser.smoothingTimeConstant = 0.8;
             
+            // Initialize improved chord detector
+            this.improvedDetector = new ImprovedChordDetector(this);
+            
             this.isRunning = true;
             this.startBtn.classList.add('hidden');
             this.stopBtn.classList.remove('hidden');
@@ -387,8 +399,11 @@ class ChordDetector {
             const chord = this.detectChord(dataArray);
             
             if (chord) {
-                this.currentChord.textContent = chord.name;
-                this.confidence.textContent = `Confianza: ${Math.round(chord.confidence * 100)}%`;
+                // Store chord in buffer with timestamp for 2-second delay synchronization
+                this.addChordToBuffer(chord, currentTime);
+                
+                // Update display with chord that should be playing now (after 2-second delay)
+                this.updateDisplayWithDelayedChord(currentTime);
                 
                 // Add to ticker only if chord changed
                 if (this.lastChord !== chord.name) {
@@ -405,12 +420,17 @@ class ChordDetector {
                     this.addToTicker(null);
                 }
             } else {
+                // No chord detected - clear display
                 this.currentChord.textContent = '--';
+                this.detectedNotes.textContent = 'Notas: --';
                 this.confidence.textContent = 'Confianza: 0%';
                 this.lastChord = null;
                 // Add empty space when no chord detected
                 this.addToTicker(null);
             }
+        } else {
+            // Update display with delayed chord even when not sampling
+            this.updateDisplayWithDelayedChord(currentTime);
         }
 
         // Update ticker colors based on timing
@@ -599,14 +619,17 @@ class ChordDetector {
         const frequencyData = new Uint8Array(bufferLength);
         this.analyser.getByteFrequencyData(frequencyData);
         
-        // Improved onset detection for studio-quality audio
+        // Use the improved chord detector if available
+        if (this.improvedDetector) {
+            console.log("Using improved chord detector...");
+            const result = this.improvedDetector.detectChord(audioData, frequencyData);
+            console.log("Improved detector result:", result);
+            return result;
+        }
+        
+        console.log("Improved detector not available, using fallback");
+        // Fallback to original detection if improved detector is not available
         const hasOnset = this.detectOnset(frequencyData);
-        
-        // For studio recordings, use fixed high sensitivity threshold
-        // No adaptive threshold needed for clean audio
-        this.adaptiveThreshold = 0.01; // Very sensitive for studio audio
-        
-        // Always analyze when onset is detected, otherwise sample based on BPM
         const currentTime = performance.now();
         const shouldAnalyze = hasOnset || this.shouldSample(currentTime);
         
@@ -614,13 +637,8 @@ class ChordDetector {
             return null;
         }
         
-        // Find fundamental frequencies using improved harmonic analysis
         const fundamentals = this.findFundamentalFrequencies(frequencyData);
-        
-        // Convert frequencies to notes with octave information
         const notesWithOctaves = fundamentals.map(freq => this.frequencyToNoteWithOctave(freq));
-        
-        // Enhanced chord detection with temporal analysis
         return this.identifyChordWithTemporalAnalysis(notesWithOctaves, fundamentals);
     }
 
@@ -999,6 +1017,69 @@ class ChordDetector {
         }
     }
 
+    addChordToBuffer(chord, detectionTime) {
+        // Add chord to buffer with timestamp
+        this.chordBuffer.push({
+            chord: chord,
+            detectionTime: detectionTime,
+            playTime: detectionTime + 2000 // 2-second delay
+        });
+        
+        // Limit buffer size
+        if (this.chordBuffer.length > this.maxBufferSize) {
+            this.chordBuffer.shift();
+        }
+        
+        console.log(`Chord buffer: added ${chord.name} at ${detectionTime}, will play at ${detectionTime + 2000}`);
+    }
+
+    updateDisplayWithDelayedChord(currentTime) {
+        // Find the chord that should be playing now (after 2-second delay)
+        const currentPlayTime = currentTime;
+        let chordToDisplay = null;
+        
+        // Look for chords that should be playing now
+        for (let i = this.chordBuffer.length - 1; i >= 0; i--) {
+            const chordData = this.chordBuffer[i];
+            
+            // If this chord's play time is in the past or very close to current time
+            if (chordData.playTime <= currentPlayTime + 100) { // 100ms tolerance
+                chordToDisplay = chordData.chord;
+                break;
+            }
+        }
+        
+        // Update display if we found a chord to show
+        if (chordToDisplay) {
+            this.currentChord.textContent = chordToDisplay.name;
+            this.confidence.textContent = `Confianza: ${Math.round(chordToDisplay.confidence * 100)}%`;
+            
+            // Update detected notes display
+            if (chordToDisplay.notes && chordToDisplay.notes.length > 0) {
+                this.detectedNotes.textContent = `Notas: ${chordToDisplay.notes.join(', ')}`;
+            } else {
+                this.detectedNotes.textContent = 'Notas: --';
+            }
+            
+            this.currentDisplayedChord = chordToDisplay;
+        } else if (this.currentDisplayedChord) {
+            // Keep displaying the current chord if no new chord found
+            this.currentChord.textContent = this.currentDisplayedChord.name;
+            this.confidence.textContent = `Confianza: ${Math.round(this.currentDisplayedChord.confidence * 100)}%`;
+            
+            if (this.currentDisplayedChord.notes && this.currentDisplayedChord.notes.length > 0) {
+                this.detectedNotes.textContent = `Notas: ${this.currentDisplayedChord.notes.join(', ')}`;
+            } else {
+                this.detectedNotes.textContent = 'Notas: --';
+            }
+        } else {
+            // No chord to display
+            this.currentChord.textContent = '--';
+            this.detectedNotes.textContent = 'Notas: --';
+            this.confidence.textContent = 'Confianza: 0%';
+        }
+    }
+
     playChordAnnouncement(chordName, detectionTime) {
         if (!this.audioOutputEnabled || !this.announcementOscillator || !this.announcementGain) {
             console.log(`playChordAnnouncement: Not ready - enabled: ${this.audioOutputEnabled}, osc: ${!!this.announcementOscillator}, gain: ${!!this.announcementGain}`);
@@ -1035,14 +1116,28 @@ class ChordDetector {
                 this.updateTicker(); // Update ticker to remove red highlight
             }, 500);
 
-            // Map chord to frequency for announcement tone
+            // Map chord to frequency for announcement tone - use root note frequency
             const noteFrequencies = {
+                // Major chords - root note frequencies
                 'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13,
                 'E': 329.63, 'F': 349.23, 'F#': 369.99, 'G': 392.00,
                 'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88,
+                
+                // Minor chords - same root note frequencies as major
                 'Cm': 261.63, 'C#m': 277.18, 'Dm': 293.66, 'D#m': 311.13,
                 'Em': 329.63, 'Fm': 349.23, 'F#m': 369.99, 'Gm': 392.00,
-                'G#m': 415.30, 'Am': 440.00, 'A#m': 466.16, 'Bm': 493.88
+                'G#m': 415.30, 'Am': 440.00, 'A#m': 466.16, 'Bm': 493.88,
+                
+                // Extended chords - use root note frequencies
+                'C7': 261.63, 'C#7': 277.18, 'D7': 293.66, 'D#7': 311.13,
+                'E7': 329.63, 'F7': 349.23, 'F#7': 369.99, 'G7': 392.00,
+                'G#7': 415.30, 'A7': 440.00, 'A#7': 466.16, 'B7': 493.88,
+                'Cm7': 261.63, 'C#m7': 277.18, 'Dm7': 293.66, 'D#m7': 311.13,
+                'Em7': 329.63, 'Fm7': 349.23, 'F#m7': 369.99, 'Gm7': 392.00,
+                'G#m7': 415.30, 'Am7': 440.00, 'A#m7': 466.16, 'Bm7': 493.88,
+                'Cmaj7': 261.63, 'C#maj7': 277.18, 'Dmaj7': 293.66, 'D#maj7': 311.13,
+                'Emaj7': 329.63, 'Fmaj7': 349.23, 'F#maj7': 369.99, 'Gmaj7': 392.00,
+                'G#maj7': 415.30, 'Amaj7': 440.00, 'A#maj7': 466.16, 'Bmaj7': 493.88
             };
 
             const frequency = noteFrequencies[chordName] || 440;

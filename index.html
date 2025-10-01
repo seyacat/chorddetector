@@ -93,6 +93,13 @@
             text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
         }
 
+        .detected-notes {
+            font-size: 1em;
+            opacity: 0.6;
+            margin-top: 5px;
+            font-style: italic;
+        }
+
         .confidence {
             font-size: 1.2em;
             opacity: 0.8;
@@ -227,6 +234,7 @@
 
         <div class="chord-display">
             <div class="current-chord" id="currentChord">--</div>
+            <div class="detected-notes" id="detectedNotes">Notas: --</div>
             <div class="confidence" id="confidence">Confianza: 0%</div>
             <div class="bpm-display" id="bpmDisplay">BPM: --</div>
             <div class="ticker-container">
@@ -243,6 +251,7 @@
         </div>
     </div>
 
+    <script src="improved-chord-detector.js"></script>
     <script src="renderer.js"></script>
 </body>
 </html>
