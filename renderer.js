@@ -87,6 +87,9 @@ class ChordDetector {
     initializeElements() {
         this.audioInput = document.getElementById('audioInput');
         this.audioOutput = document.getElementById('audioOutput');
+        this.vstPlugin = document.getElementById('vstPlugin');
+        this.scanVSTBtn = document.getElementById('scanVSTBtn');
+        this.showVSTGUIBtn = document.getElementById('showVSTGUIBtn');
         this.startBtn = document.getElementById('startBtn');
         this.stopBtn = document.getElementById('stopBtn');
         this.currentChord = document.getElementById('currentChord');
@@ -153,10 +156,16 @@ class ChordDetector {
         this.stopBtn.addEventListener('click', () => this.stopDetection());
         this.audioInput.addEventListener('change', () => this.onDeviceChange());
         this.audioOutput.addEventListener('change', () => this.onDeviceChange());
+        this.vstPlugin.addEventListener('change', () => this.onVSTPluginChange());
+        this.scanVSTBtn.addEventListener('click', () => this.scanVSTPlugins());
+        this.showVSTGUIBtn.addEventListener('click', () => this.showVSTPluginGUI());
         this.enableAudioOutputBtn.addEventListener('click', () => this.enableAudioOutput());
         this.disableAudioOutputBtn.addEventListener('click', () => this.disableAudioOutput());
         this.multiChordBtn.addEventListener('click', () => this.toggleMultiChordMode());
         this.announcementBtn.addEventListener('click', () => this.toggleAnnouncements());
+
+        // Setup VST event listeners
+        this.setupVSTEventListeners();
     }
 
     setupVisibilityHandlers() {
@@ -433,80 +442,95 @@ class ChordDetector {
     processAudio() {
         if (!this.isRunning) return;
 
-        // Check if AudioContext is suspended and try to resume it
-        if (this.audioContext && this.audioContext.state === 'suspended') {
-            console.log('processAudio: AudioContext is suspended, attempting to resume');
-            this.audioContext.resume().then(() => {
-                console.log('processAudio: AudioContext resumed successfully');
-            }).catch(err => {
-                console.warn('processAudio: Failed to resume AudioContext:', err);
-            });
-        }
+        // In VST mode, we don't have audioContext/analyser
+        if (this.audioContext && this.analyser) {
+            // Regular audio device mode
+            // Check if AudioContext is suspended and try to resume it
+            if (this.audioContext.state === 'suspended') {
+                console.log('processAudio: AudioContext is suspended, attempting to resume');
+                this.audioContext.resume().then(() => {
+                    console.log('processAudio: AudioContext resumed successfully');
+                }).catch(err => {
+                    console.warn('processAudio: Failed to resume AudioContext:', err);
+                });
+            }
 
-        const bufferLength = this.analyser.frequencyBinCount;
-        const dataArray = new Float32Array(bufferLength);
-        this.analyser.getFloatTimeDomainData(dataArray);
+            const bufferLength = this.analyser.frequencyBinCount;
+            const dataArray = new Float32Array(bufferLength);
+            this.analyser.getFloatTimeDomainData(dataArray);
 
-        // Draw waveform visualization
-        this.drawWaveform(dataArray);
+            // Draw waveform visualization
+            this.drawWaveform(dataArray);
 
-        // Improved chord detection with stabilization
-        const currentTime = performance.now();
-        
-        // Detect chord with minimum interval to avoid over-processing
-        if (currentTime - this.lastChordDetectionTime > this.minDetectionInterval) {
-            const chord = this.detectChord(dataArray);
+            // Improved chord detection with stabilization
+            const currentTime = performance.now();
             
-            if (chord && chord.confidence > 0.5) { // Lower confidence threshold for better detection
-                // Add vote for this chord
-                this.addChordVote(chord.name, currentTime);
+            // Detect chord with minimum interval to avoid over-processing
+            if (currentTime - this.lastChordDetectionTime > this.minDetectionInterval) {
+                const chord = this.detectChord(dataArray);
                 
-                // Check if we have a stable chord
-                const stableChord = this.getStableChord(currentTime);
-                
-                if (stableChord && stableChord !== this.currentStableChord) {
-                    // New stable chord detected
-                    this.currentStableChord = stableChord;
-                    this.lastStableChordTime = currentTime;
+                if (chord && chord.confidence > 0.5) { // Lower confidence threshold for better detection
+                    // Add vote for this chord
+                    this.addChordVote(chord.name, currentTime);
                     
-                    // Store chord in buffer with timestamp for 2-second delay synchronization
-                    this.addChordToBuffer(chord, currentTime);
+                    // Check if we have a stable chord
+                    const stableChord = this.getStableChord(currentTime);
                     
-                    // Add to ticker only if chord changed
-                    if (this.lastChord !== stableChord) {
-                        this.addToTicker(stableChord);
-                        this.lastChord = stableChord;
-                        this.lastDetectionTime = currentTime;
+                    if (stableChord && stableChord !== this.currentStableChord) {
+                        // New stable chord detected
+                        this.currentStableChord = stableChord;
+                        this.lastStableChordTime = currentTime;
                         
-                    // Play chord announcement if audio output is enabled
-                    if (this.audioOutputEnabled) {
-                        this.playNotesAnnouncement(chord, currentTime);
-                    }
+                        // Store chord in buffer with timestamp for 2-second delay synchronization
+                        this.addChordToBuffer(chord, currentTime);
+                        
+                        // Add to ticker only if chord changed
+                        if (this.lastChord !== stableChord) {
+                            this.addToTicker(stableChord);
+                            this.lastChord = stableChord;
+                            this.lastDetectionTime = currentTime;
+                            
+                        // Play chord announcement if audio output is enabled
+                        if (this.audioOutputEnabled) {
+                            this.playNotesAnnouncement(chord, currentTime);
+                        }
+                        } else {
+                            // Add empty space when chord doesn't change
+                            this.addToTicker(null);
+                        }
+                    } else if (stableChord) {
+                        // Same stable chord - add empty space
+                        this.addToTicker(null);
                     } else {
-                        // Add empty space when chord doesn't change
+                        // No stable chord - add empty space
                         this.addToTicker(null);
                     }
-                } else if (stableChord) {
-                    // Same stable chord - add empty space
-                    this.addToTicker(null);
+                    
+                    this.lastChordDetectionTime = currentTime;
                 } else {
-                    // No stable chord - add empty space
+                    // No chord detected - add empty space to ticker
                     this.addToTicker(null);
+                    this.lastChordDetectionTime = currentTime;
                 }
-                
-                this.lastChordDetectionTime = currentTime;
-            } else {
-                // No chord detected - add empty space to ticker
-                this.addToTicker(null);
-                this.lastChordDetectionTime = currentTime;
             }
-        }
-        
-        // Always update display with delayed chord (continuous display update)
-        this.updateDisplayWithDelayedChord(currentTime);
+            
+            // Always update display with delayed chord (continuous display update)
+            this.updateDisplayWithDelayedChord(currentTime);
 
-        // Update ticker colors based on timing
-        this.updateTicker();
+            // Update ticker colors based on timing
+            this.updateTicker();
+        } else {
+            // VST mode - simulate processing without audio data
+            const currentTime = performance.now();
+            
+            // In VST mode, we need to get audio data from the VST bridge
+            // For now, we'll just update the display and ticker
+            this.updateDisplayWithDelayedChord(currentTime);
+            this.updateTicker();
+            
+            // Add empty space to ticker to keep it moving
+            this.addToTicker(null);
+        }
         
         this.animationId = requestAnimationFrame(() => this.processAudio());
     }
@@ -581,6 +605,16 @@ class ChordDetector {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
         ctx.fillRect(0, 0, width, height);
 
+        // In VST mode, we don't have audio data, so draw a placeholder
+        if (!dataArray || dataArray.length === 0) {
+            // Draw VST mode indicator
+            ctx.fillStyle = 'rgba(78, 205, 196, 0.5)';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('VST Mode - Audio from Plugin', width / 2, height / 2);
+            return;
+        }
+
         // Draw waveform with more amplitude
         ctx.beginPath();
         ctx.lineWidth = 3;
@@ -614,6 +648,13 @@ class ChordDetector {
     }
 
     detectChord(audioData) {
+        // Check if we have an analyser (not available in VST mode)
+        if (!this.analyser) {
+            // In VST mode, we need to handle audio differently
+            // For now, return null since we don't have frequency data
+            return null;
+        }
+        
         // Use both time domain and frequency domain analysis
         const bufferLength = this.analyser.frequencyBinCount;
         const frequencyData = new Uint8Array(bufferLength);
@@ -629,6 +670,11 @@ class ChordDetector {
     }
 
     detectChordsByFrequencyRanges(frequencyData) {
+        // Check if we have audio context (not available in VST mode)
+        if (!this.audioContext) {
+            return null;
+        }
+        
         const sampleRate = this.audioContext.sampleRate;
         const bufferLength = frequencyData.length;
         
@@ -778,6 +824,11 @@ class ChordDetector {
     }
 
     fallbackChordDetection(audioData, frequencyData) {
+        // Check if we have audio context (not available in VST mode)
+        if (!this.audioContext) {
+            return null;
+        }
+        
         // Original chord detection method that worked before
         const hasOnset = this.detectOnset(frequencyData);
         const currentTime = performance.now();
@@ -798,6 +849,11 @@ class ChordDetector {
     }
 
     findFundamentalFrequencies(frequencyData) {
+        // Check if we have audio context (not available in VST mode)
+        if (!this.audioContext) {
+            return [];
+        }
+        
         const peaks = [];
         const sampleRate = this.audioContext.sampleRate;
         const bufferLength = frequencyData.length;
@@ -1566,6 +1622,304 @@ class ChordDetector {
         }, remainingDelay);
     }
 }
+
+
+// VST Plugin Management Methods
+ChordDetector.prototype.setupVSTEventListeners = function() {
+    if (window.electronAPI) {
+        window.electronAPI.onVSTStatus((message) => {
+            console.log('VST Status:', message);
+            this.status.textContent = `VST: ${message}`;
+            this.status.className = 'status info';
+        });
+
+        window.electronAPI.onVSTError((message) => {
+            console.error('VST Error:', message);
+            this.status.textContent = `VST Error: ${message}`;
+            this.status.className = 'status error';
+        });
+
+        window.electronAPI.onVSTPluginsScanned((plugins) => {
+            this.populateVSTPluginList(plugins);
+        });
+    }
+};
+
+ChordDetector.prototype.scanVSTPlugins = async function() {
+    if (!window.electronAPI) {
+        this.status.textContent = 'VST functionality not available';
+        this.status.className = 'status error';
+        return;
+    }
+
+    this.status.textContent = 'Escaneando plugins VST...';
+    this.status.className = 'status info';
+
+    try {
+        const plugins = await window.electronAPI.scanVSTPlugins();
+        this.populateVSTPluginList(plugins);
+        
+        if (plugins.length > 0) {
+            this.status.textContent = `Encontrados ${plugins.length} plugins VST`;
+            this.status.className = 'status info';
+        } else {
+            this.status.textContent = 'No se encontraron plugins VST';
+            this.status.className = 'status';
+        }
+    } catch (error) {
+        this.status.textContent = `Error al escanear plugins VST: ${error.message}`;
+        this.status.className = 'status error';
+    }
+};
+
+ChordDetector.prototype.populateVSTPluginList = function(plugins) {
+    this.vstPlugin.innerHTML = '<option value="">Selecciona un plugin VST...</option>';
+    
+    plugins.forEach(plugin => {
+        const option = document.createElement('option');
+        option.value = plugin.path;
+        option.textContent = `${plugin.name} (${plugin.type})`;
+        this.vstPlugin.appendChild(option);
+    });
+};
+
+ChordDetector.prototype.onVSTPluginChange = async function() {
+    const pluginPath = this.vstPlugin.value;
+    
+    if (!pluginPath) {
+        // Hide GUI button when no plugin selected
+        this.showVSTGUIBtn.classList.add('hidden');
+        this.showVSTGUIBtn.disabled = true;
+        return;
+    }
+
+    try {
+        const pluginName = pluginPath.split(/[\\/]/).pop();
+        this.status.textContent = `Cargando plugin VST: ${pluginName}`;
+        this.status.className = 'status info';
+        
+        // Disable GUI button while loading
+        this.showVSTGUIBtn.classList.add('hidden');
+        this.showVSTGUIBtn.disabled = true;
+
+        const success = await window.electronAPI.loadVSTPlugin(pluginPath);
+        
+        if (success) {
+            this.status.textContent = `Plugin VST cargado: ${pluginName}`;
+            this.status.className = 'status info';
+            
+            // Enable and show GUI button when plugin is loaded
+            this.showVSTGUIBtn.classList.remove('hidden');
+            this.showVSTGUIBtn.disabled = false;
+            
+            // If already running, restart with VST
+            if (this.isRunning) {
+                this.stopDetection();
+                setTimeout(() => this.startDetection(), 500);
+            }
+        } else {
+            this.status.textContent = 'Error al cargar el plugin VST';
+            this.status.className = 'status error';
+            this.showVSTGUIBtn.classList.add('hidden');
+            this.showVSTGUIBtn.disabled = true;
+        }
+    } catch (error) {
+        this.status.textContent = `Error al cargar plugin VST: ${error.message}`;
+        this.status.className = 'status error';
+        this.showVSTGUIBtn.classList.add('hidden');
+        this.showVSTGUIBtn.disabled = true;
+    }
+};
+
+ChordDetector.prototype.showVSTPluginGUI = async function() {
+    if (!window.electronAPI) {
+        this.status.textContent = 'VST functionality not available';
+        this.status.className = 'status error';
+        return;
+    }
+
+    try {
+        // First check if a plugin is actually loaded
+        const isLoaded = await window.electronAPI.isVSTPluginLoaded();
+        if (!isLoaded) {
+            this.status.textContent = 'No hay ningún plugin VST cargado';
+            this.status.className = 'status error';
+            return;
+        }
+
+        this.status.textContent = 'Abriendo interfaz del plugin VST...';
+        this.status.className = 'status info';
+
+        const success = await window.electronAPI.showVSTPluginGUI();
+        
+        if (success) {
+            this.status.textContent = 'Interfaz VST abierta (modo simulación)';
+            this.status.className = 'status info';
+        } else {
+            this.status.textContent = 'No se pudo abrir la interfaz VST';
+            this.status.className = 'status error';
+        }
+    } catch (error) {
+        this.status.textContent = `Error al abrir interfaz VST: ${error.message}`;
+        this.status.className = 'status error';
+    }
+};
+
+ChordDetector.prototype.startVSTProcessing = async function() {
+    const pluginPath = this.vstPlugin.value;
+    
+    if (!pluginPath) {
+        return false;
+    }
+
+    try {
+        const success = await window.electronAPI.startVSTProcessing(pluginPath, 44100, 1024);
+        return success;
+    } catch (error) {
+        console.error('Error starting VST processing:', error);
+        return false;
+    }
+};
+
+ChordDetector.prototype.stopVSTProcessing = async function() {
+    try {
+        await window.electronAPI.stopVSTProcessing();
+    } catch (error) {
+        console.error('Error stopping VST processing:', error);
+    }
+};
+
+// Override startDetection to include VST support
+ChordDetector.prototype.startDetection = async function() {
+    const deviceId = this.audioInput.value;
+    const vstPluginPath = this.vstPlugin.value;
+    
+    // If VST plugin is selected, use VST processing
+    if (vstPluginPath) {
+        const vstSuccess = await this.startVSTProcessing();
+        if (vstSuccess) {
+            this.status.textContent = 'Procesando audio desde plugin VST...';
+            this.status.className = 'status info';
+            // In VST mode, we don't use audioContext/analyser
+            this.audioContext = null;
+            this.analyser = null;
+            this.isRunning = true;
+            this.startBtn.classList.add('hidden');
+            this.stopBtn.classList.remove('hidden');
+            this.processAudio();
+            return;
+        }
+    }
+    
+    // Fall back to regular audio device detection
+    if (!deviceId) {
+        this.status.textContent = 'Por favor selecciona un dispositivo de audio o plugin VST';
+        this.status.className = 'status error';
+        return;
+    }
+
+    try {
+        this.status.textContent = 'Iniciando captura de audio...';
+        this.status.className = 'status info';
+
+        const constraints = {
+            audio: {
+                deviceId: deviceId ? { exact: deviceId } : undefined,
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false
+            }
+        };
+
+        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // Configure AudioContext to be more resilient to suspension
+        this.audioContext.onstatechange = () => {
+            // Check if audioContext still exists (might be null in VST mode)
+            if (!this.audioContext) return;
+            
+            console.log(`AudioContext state changed: ${this.audioContext.state}`);
+            if (this.audioContext.state === 'suspended' && this.isRunning) {
+                console.log('AudioContext suspended while running - attempting to resume');
+                setTimeout(() => {
+                    if (this.audioContext && this.audioContext.state === 'suspended') {
+                        this.audioContext.resume().catch(err => {
+                            console.warn('Failed to resume AudioContext:', err);
+                        });
+                    }
+                }, 100);
+            }
+        };
+        
+        this.analyser = this.audioContext.createAnalyser();
+        
+        this.source = this.audioContext.createMediaStreamSource(this.stream);
+        this.source.connect(this.analyser);
+        
+        this.analyser.fftSize = 2048;
+        this.analyser.smoothingTimeConstant = 0.8;
+        
+        this.isRunning = true;
+        this.startBtn.classList.add('hidden');
+        this.stopBtn.classList.remove('hidden');
+        this.status.textContent = 'Detección activa. Tocando música...';
+        this.status.className = 'status info';
+        
+        // If audio output was previously enabled, re-enable it
+        if (this.audioOutputEnabled) {
+            setTimeout(() => {
+                this.enableAudioOutput();
+            }, 500);
+        }
+        
+        this.processAudio();
+        
+    } catch (error) {
+        console.error('Error starting audio capture:', error);
+        this.status.textContent = 'Error al iniciar la captura de audio: ' + error.message;
+        this.status.className = 'status error';
+    }
+};
+
+// Override stopDetection to include VST cleanup
+ChordDetector.prototype.stopDetection = function() {
+    this.isRunning = false;
+    
+    if (this.animationId) {
+        cancelAnimationFrame(this.animationId);
+        this.animationId = null;
+    }
+    
+    // Clean up VST processing
+    this.stopVSTProcessing();
+    
+    // Clean up audio output resources
+    this.disableAudioOutput();
+    
+    if (this.stream) {
+        this.stream.getTracks().forEach(track => track.stop());
+        this.stream = null;
+    }
+    
+    if (this.audioContext) {
+        this.audioContext.close();
+        this.audioContext = null;
+    }
+    
+    this.startBtn.classList.remove('hidden');
+    this.stopBtn.classList.add('hidden');
+    this.currentChord.textContent = '--';
+    this.confidence.textContent = 'Confianza: 0%';
+    this.bpmDisplay.textContent = 'BPM: --';
+    this.ticker.innerHTML = '';
+    this.tickerItems = [];
+    this.lastChord = null;
+    this.lastAnnouncedChord = null;
+    this.status.textContent = 'Detección detenida';
+    this.status.className = 'status';
+};
 
 // Initialize the chord detector when the page loads
 document.addEventListener('DOMContentLoaded', () => {
